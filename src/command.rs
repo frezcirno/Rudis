@@ -1,16 +1,22 @@
-mod get;
+mod db;
+mod hash;
+mod list;
 mod ping;
 mod set;
+mod string;
 mod unknown;
 use crate::connection::Connection;
 use crate::db::Database;
 use crate::frame::Frame;
 use bytes::Bytes;
-use get::Get;
+use db::{DbSize, Del, Exists, Keys, Rename, Select, Shutdown};
+use hash::{HGet, HSet};
+use list::{ListPop, ListPush};
 use ping::Ping;
-use set::Set;
+use set::{SAdd, SRem};
 use std::io::{Error, ErrorKind, Result};
 use std::vec;
+use string::{Append, Get, Set, Strlen};
 use unknown::Unknown;
 
 pub struct CommandParser {
@@ -64,12 +70,35 @@ impl CommandParser {
 
 #[derive(Debug)]
 pub enum Command {
+    Ping(Ping),
+
     Get(Get),
     Set(Set),
+    Append(Append),
+    Strlen(Strlen),
+
+    Del(Del),
+    Exists(Exists),
+    Select(Select),
+    Keys(Keys),
+    DbSize(DbSize),
+    Shutdown(Shutdown),
+    Rename(Rename),
+
+    LPush(ListPush),
+    RPush(ListPush),
+    LPop(ListPop),
+    RPop(ListPop),
+
+    HSet(HSet),
+    HGet(HGet),
+
+    SAdd(SAdd),
+    SRem(SRem),
+
     // Publish(Publish),
     // Subscribe(Subscribe),
     // Unsubscribe(Unsubscribe),
-    Ping(Ping),
     Unknown(Unknown),
 }
 
@@ -88,8 +117,31 @@ impl Command {
 
         let command = match &cmd.to_ascii_lowercase()[..] {
             b"ping" => Command::Ping(Ping::from(&mut parser)?),
+
             b"get" => Command::Get(Get::from(&mut parser)?),
             b"set" => Command::Set(Set::from(&mut parser)?),
+            b"append" => Command::Append(Append::from(&mut parser)?),
+            b"strlen" => Command::Strlen(Strlen::from(&mut parser)?),
+
+            b"del" => Command::Del(Del::from(&mut parser)?),
+            b"exists" => Command::Exists(Exists::from(&mut parser)?),
+            b"select" => Command::Select(Select::from(&mut parser)?),
+            b"keys" => Command::Keys(Keys::from(&mut parser)?),
+            b"dbsize" => Command::DbSize(DbSize::from(&mut parser)?),
+            b"shutdown" => Command::Shutdown(Shutdown::from(&mut parser)?),
+            b"rename" => Command::Rename(Rename::from(&mut parser)?),
+
+            b"lpush" => Command::LPush(ListPush::from(&mut parser, true)?),
+            b"rpush" => Command::RPush(ListPush::from(&mut parser, true)?),
+            b"lpop" => Command::LPop(ListPop::from(&mut parser, true)?),
+            b"rpop" => Command::RPop(ListPop::from(&mut parser, false)?),
+
+            b"hset" => Command::HSet(HSet::from(&mut parser)?),
+            b"hget" => Command::HGet(HGet::from(&mut parser)?),
+
+            b"sadd" => Command::SAdd(SAdd::from(&mut parser)?),
+            b"srem" => Command::SRem(SRem::from(&mut parser)?),
+
             // b"publish" => Ok(Command::Publish(Publish {})),
             // b"subscribe" => Ok(Command::Subscribe(Subscribe {})),
             // b"unsubscribe" => Ok(Command::Unsubscribe(Unsubscribe {})),
@@ -106,14 +158,37 @@ impl Command {
     pub(crate) async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
         match self {
             Command::Ping(cmd) => cmd.apply(db, dst).await,
+
             Command::Get(cmd) => cmd.apply(db, dst).await,
             Command::Set(cmd) => cmd.apply(db, dst).await,
+            Command::Append(cmd) => cmd.apply(db, dst).await,
+            Command::Strlen(cmd) => cmd.apply(db, dst).await,
+
+            Command::Del(cmd) => cmd.apply(db, dst).await,
+            Command::Exists(cmd) => cmd.apply(db, dst).await,
+            Command::Select(_) => unreachable!(),
+            Command::Keys(cmd) => cmd.apply(db, dst).await,
+            Command::DbSize(_) => unreachable!(),
+            Command::Shutdown(cmd) => cmd.apply(db, dst).await,
+            Command::Rename(cmd) => cmd.apply(db, dst).await,
+
+            Command::LPush(cmd) => cmd.apply(db, dst).await,
+            Command::RPush(cmd) => cmd.apply(db, dst).await,
+            Command::LPop(cmd) => cmd.apply(db, dst).await,
+            Command::RPop(cmd) => cmd.apply(db, dst).await,
+
+            Command::HSet(cmd) => cmd.apply(db, dst).await,
+            Command::HGet(cmd) => cmd.apply(db, dst).await,
+
+            Command::SAdd(cmd) => cmd.apply(db, dst).await,
+            Command::SRem(cmd) => cmd.apply(db, dst).await,
+
             // Publish(cmd) => cmd.apply(db, dst).await,
             // Subscribe(cmd) => cmd.apply(db, dst, shutdown).await,
-            Command::Unknown(cmd) => cmd.apply(db, dst).await,
             // `Unsubscribe` cannot be applied. It may only be received from the
             // context of a `Subscribe` command.
             // Unsubscribe(_) => Err("`Unsubscribe` is unsupported in this context".into()),
+            Command::Unknown(cmd) => cmd.apply(db, dst).await,
         }
     }
 }

@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::connection::Connection;
 use crate::db::Database;
 use log;
+use std::borrow::BorrowMut;
 use std::io::{Error, ErrorKind, Result};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -32,16 +33,22 @@ pub struct RudisServerInner {
 
 pub struct Server {
     pub config: Config,
-    pub db: Vec<Database>,
+    pub dbs: Arc<Vec<Database>>,
     pub inner: RwLock<RudisServerInner>,
     quit_ch: broadcast::Sender<()>,
 }
 
 impl Server {
     pub async fn from_config(config: Config) -> Arc<Server> {
-        let mut server = Server {
+        // create databases
+        let mut dbs = Vec::new();
+        for _ in 0..config.db_num {
+            dbs.push(Database::new());
+        }
+
+        let server = Server {
             config,
-            db: Vec::new(),
+            dbs: Arc::new(dbs),
             inner: RwLock::new(RudisServerInner {
                 runid: gen_runid(),
                 hz: 10,
@@ -50,16 +57,7 @@ impl Server {
             quit_ch: broadcast::channel(1).0,
         };
 
-        server.init().await;
-
         Arc::new(server)
-    }
-
-    async fn init(&mut self) {
-        // create databases
-        for i in 0..self.config.db_num {
-            self.db.push(Database::new());
-        }
     }
 
     pub async fn start(self: &Arc<Self>) -> Result<()> {
@@ -85,7 +83,9 @@ impl Server {
                 Ok((connection, address)) => {
                     log::info!("Accepted connection from {}", address);
                     let mut c = Client {
-                        db: self.db[0].clone(),
+                        dbs: self.dbs.clone(),
+                        index: 0,
+                        db: self.dbs[0].clone(),
                         connection: Connection::from(connection),
                         address,
                         inner: RwLock::new(ClientInner {
@@ -93,7 +93,6 @@ impl Server {
                             last_interaction: 0,
                             flags: Default::default(),
                         }),
-                        index: 0,
                         quit: false.into(),
                         quit_ch: self.quit_ch.subscribe(),
                     };

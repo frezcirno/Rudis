@@ -1,8 +1,9 @@
-use crate::object::{RudisObject, RudisString};
+use crate::object::RudisObject;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 static mut ID: AtomicU32 = AtomicU32::new(0);
 
@@ -11,9 +12,9 @@ pub struct Database {
 }
 
 pub struct DatabaseInner {
-    id: u32,
-    dict: HashMap<Bytes, RudisObject>,
-    expires: HashMap<Bytes, u64>, // millisecond timestamp
+    pub id: u32,
+    pub dict: HashMap<Bytes, RudisObject>,
+    pub expires: HashMap<Bytes, u64>, // millisecond timestamp
 }
 
 fn timestamps() -> u64 {
@@ -50,6 +51,46 @@ impl DatabaseInner {
         self.check_expired(key);
         self.dict.get_mut(key)
     }
+
+    pub fn remove(&mut self, key: &Bytes) -> Option<RudisObject> {
+        self.check_expired(key);
+        self.expires.remove(key);
+        self.dict.remove(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.dict.len()
+    }
+
+    pub fn keys(&self) -> Vec<Bytes> {
+        self.dict.keys().cloned().collect()
+    }
+
+    pub fn contains_key(&self, key: &Bytes) -> bool {
+        self.dict.contains_key(key)
+    }
+
+    pub fn insert(&mut self, key: Bytes, value: RudisObject, expire: Option<u64>) {
+        self.dict.insert(key.clone(), value);
+
+        if let Some(expire) = expire {
+            let now = timestamps();
+            self.expires.insert(key, now + expire);
+        }
+    }
+
+    pub fn rename(&mut self, key: &Bytes, new_key: Bytes) -> bool {
+        if let Some(v) = self.dict.remove(key) {
+            self.dict.insert(new_key.clone(), v);
+            // rename expire
+            if let Some(t) = self.expires.remove(key) {
+                self.expires.insert(new_key, t);
+            }
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl Database {
@@ -69,25 +110,7 @@ impl Database {
         }
     }
 
-    pub fn lock(&self) -> std::sync::MutexGuard<DatabaseInner> {
-        self.inner.lock().unwrap()
-    }
-
-    pub fn has_key(&self, key: &Bytes) -> bool {
-        let mut inner = self.inner.lock().unwrap();
-        inner.check_expired(key);
-        inner.dict.contains_key(key)
-    }
-
-    pub fn set_key(&self, key: Bytes, value: Bytes, expire: Option<u64>) {
-        let obj = RudisObject::String(RudisString::from(value));
-
-        let mut inner = self.inner.lock().unwrap();
-        inner.dict.insert(key.clone(), obj);
-
-        if let Some(expire) = expire {
-            let now = timestamps();
-            inner.expires.insert(key, now + expire);
-        }
+    pub async fn lock(&self) -> tokio::sync::MutexGuard<DatabaseInner> {
+        self.inner.lock().await
     }
 }

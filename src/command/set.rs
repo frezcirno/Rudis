@@ -1,89 +1,109 @@
 use super::CommandParser;
-use crate::connection::Connection;
 use crate::db::Database;
+use crate::object::RudisObject;
 use crate::shared;
-use bytes::Bytes;
+use crate::{connection::Connection, frame::Frame};
+use bytes::{Bytes, BytesMut};
 use std::io::{Error, ErrorKind, Result};
 
-const REDIS_SET_NO_FLAGS: u32 = 0;
-const REDIS_SET_NX: u32 = 1 << 0; /* Set if key not exists. */
-const REDIS_SET_XX: u32 = 1 << 1; /* Set if key exists. */
-
 #[derive(Debug)]
-pub struct Set {
+pub struct SAdd {
     pub key: Bytes,
-    pub val: Bytes,
-    pub flags: u32,
-    pub expire: Option<u64>, // milliseconds
+    pub members: Vec<Bytes>,
 }
 
-impl Set {
+impl SAdd {
     pub fn from(frame: &mut CommandParser) -> Result<Self> {
-        if frame.remaining() < 2 {
-            return Err(Error::new(ErrorKind::Other, shared::syntax_err.to_string()));
+        let key = frame
+            .next_string()?
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "SADD requires a key"))?;
+        let mut members = vec![];
+        while let Some(member) = frame.next_string()? {
+            members.push(member);
         }
-        // The first two elements of the array are the key and value
-        let key = frame.next_string()?.unwrap();
-        let val = frame.next_string()?.unwrap();
-
-        let mut flags = REDIS_SET_NO_FLAGS;
-        let mut expire = None;
-
-        while frame.has_next() {
-            let val = frame.next_string()?.unwrap().to_ascii_lowercase();
-            if &val == b"nx" {
-                flags |= REDIS_SET_NX;
-            } else if &val == b"xx" {
-                flags |= REDIS_SET_XX;
-            } else if &val == b"ex" {
-                // expire time in seconds
-                let time = {
-                    if let Some(maybe_time) = frame.next_integer()? {
-                        maybe_time
-                    } else {
-                        return Err(Error::new(ErrorKind::Other, shared::syntax_err.to_string()));
-                    }
-                };
-                expire = Some(time * 1000);
-            } else if &val == b"px" {
-                // expire time in milliseconds
-                let time = {
-                    if let Some(maybe_time) = frame.next_integer()? {
-                        maybe_time
-                    } else {
-                        return Err(Error::new(ErrorKind::Other, shared::syntax_err.to_string()));
-                    }
-                };
-                expire = Some(time);
-            } else {
-                // error
-                return Err(Error::new(ErrorKind::Other, shared::syntax_err.to_string()));
-            }
-        }
-
-        Ok(Self {
-            key,
-            val,
-            flags,
-            expire,
-        })
+        Ok(Self { key, members })
     }
 
     pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
-        {
-            // validate nx and xx
-            if self.flags & REDIS_SET_NX != 0 && db.has_key(&self.key)
-                || self.flags & REDIS_SET_XX != 0 && !db.has_key(&self.key)
-            {
-                dst.write_frame(&shared::null_bulk).await.unwrap();
-                return Ok(());
+        let mut db = db.lock().await;
+
+        match db.lookup_write(&self.key.clone()) {
+            Some(RudisObject::Set(s)) => {
+                let mut added = 0;
+                for member in self.members {
+                    if s.insert(member) {
+                        added += 1;
+                    }
+                }
+                dst.write_frame(&Frame::new_integer_from(added as u64)?)
+                    .await?;
+                Ok(())
             }
-
-            db.set_key(self.key, self.val, self.expire);
+            Some(_) => {
+                dst.write_frame(&shared::wrong_type_err).await?;
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "WRONGTYPE Operation against a key holding the wrong kind of value",
+                ));
+            }
+            None => {
+                let mut s = std::collections::HashSet::new();
+                let len = self.members.len();
+                for member in self.members {
+                    s.insert(member);
+                }
+                db.insert(self.key.clone(), RudisObject::new_set_from(s), None);
+                dst.write_frame(&Frame::new_integer_from(len as u64)?)
+                    .await?;
+                Ok(())
+            }
         }
+    }
+}
 
-        dst.write_frame(&shared::ok).await?;
+#[derive(Debug)]
+pub struct SRem {
+    pub key: Bytes,
+    pub members: Vec<Bytes>,
+}
 
-        Ok(())
+impl SRem {
+    pub fn from(frame: &mut CommandParser) -> Result<Self> {
+        let key = frame
+            .next_string()?
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "SREM requires a key"))?;
+        let mut members = vec![];
+        while let Some(member) = frame.next_string()? {
+            members.push(member);
+        }
+        Ok(Self { key, members })
+    }
+
+    pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
+        let mut db = db.lock().await;
+
+        match db.lookup_write(&self.key.clone()) {
+            Some(RudisObject::Set(s)) => {
+                let mut removed = 0;
+                for member in self.members {
+                    if s.remove(&member) {
+                        removed += 1;
+                    }
+                }
+                dst.write_frame(&Frame::Integer(removed as u64)).await?;
+                Ok(())
+            }
+            Some(_) => {
+                dst.write_frame(&shared::wrong_type_err).await?;
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "WRONGTYPE Operation against a key holding the wrong kind of value",
+                ));
+            }
+            None => {
+                dst.write_frame(&Frame::Integer(0)).await?;
+                Ok(())
+            }
+        }
     }
 }

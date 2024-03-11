@@ -1,45 +1,52 @@
-use bytes::Bytes;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use bytes::{Bytes, BytesMut};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    ops::{Deref, DerefMut},
+};
 
 use crate::frame::Frame;
 
 pub struct RudisString {
-    value: Bytes,
+    pub value: BytesMut,
 }
 
 impl RudisString {
-    pub fn from(value: Bytes) -> RudisString {
+    pub fn from(value: BytesMut) -> RudisString {
         RudisString { value }
     }
+}
 
-    pub fn set(&mut self, value: Bytes) {
-        self.value = value;
-    }
+impl Deref for RudisString {
+    type Target = BytesMut;
 
-    pub fn get(&self) -> &Bytes {
+    fn deref(&self) -> &Self::Target {
         &self.value
     }
 }
 
 pub struct RudisList {
-    value: Vec<Bytes>,
+    value: VecDeque<BytesMut>,
 }
 
 impl RudisList {
     pub fn new() -> RudisList {
-        RudisList { value: Vec::new() }
+        RudisList {
+            value: VecDeque::new(),
+        }
     }
+}
 
-    pub fn push(&mut self, value: Bytes) {
-        self.value.push(value);
+impl Deref for RudisList {
+    type Target = VecDeque<BytesMut>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
     }
+}
 
-    pub fn pop(&mut self) -> Option<Bytes> {
-        self.value.pop()
-    }
-
-    pub fn get(&self, index: usize) -> Option<&Bytes> {
-        self.value.get(index)
+impl DerefMut for RudisList {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
     }
 }
 
@@ -53,17 +60,19 @@ impl RudisSet {
             value: HashSet::new(),
         }
     }
+}
 
-    pub fn insert(&mut self, value: Bytes) {
-        self.value.insert(value);
+impl Deref for RudisSet {
+    type Target = HashSet<Bytes>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
     }
+}
 
-    pub fn remove(&mut self, value: &Bytes) {
-        self.value.remove(value);
-    }
-
-    pub fn contains(&self, value: &Bytes) -> bool {
-        self.value.contains(value)
+impl DerefMut for RudisSet {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
     }
 }
 
@@ -77,17 +86,19 @@ impl RudisHash {
             value: HashMap::new(),
         }
     }
+}
 
-    pub fn set(&mut self, key: Bytes, value: Bytes) {
-        self.value.insert(key, value);
+impl Deref for RudisHash {
+    type Target = HashMap<Bytes, Bytes>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
     }
+}
 
-    pub fn get(&self, key: &Bytes) -> Option<&Bytes> {
-        self.value.get(key)
-    }
-
-    pub fn remove(&mut self, key: &Bytes) {
-        self.value.remove(key);
+impl DerefMut for RudisHash {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
     }
 }
 
@@ -101,17 +112,19 @@ impl RudisZSet {
             value: BTreeMap::new(),
         }
     }
+}
 
-    pub fn insert(&mut self, key: Bytes, score: f64) {
-        self.value.insert(key, score);
+impl Deref for RudisZSet {
+    type Target = BTreeMap<Bytes, f64>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
     }
+}
 
-    pub fn remove(&mut self, key: &Bytes) {
-        self.value.remove(key);
-    }
-
-    pub fn score(&self, key: &Bytes) -> Option<&f64> {
-        self.value.get(key)
+impl DerefMut for RudisZSet {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
     }
 }
 
@@ -124,20 +137,62 @@ pub enum RudisObject {
 }
 
 impl RudisObject {
+    pub fn new_string() -> RudisObject {
+        RudisObject::String(RudisString::from(BytesMut::new()))
+    }
+
+    pub fn from_string(value: BytesMut) -> RudisObject {
+        RudisObject::String(RudisString::from(value))
+    }
+
+    pub fn get_string(&self) -> Option<&RudisString> {
+        match self {
+            RudisObject::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn set_string(&mut self, value: RudisString) {
+        *self = RudisObject::String(value);
+    }
+
+    pub fn as_string(&self) -> Option<&BytesMut> {
+        match self {
+            RudisObject::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
     pub fn new_list() -> RudisObject {
         RudisObject::List(RudisList::new())
+    }
+
+    pub fn new_list_from(value: VecDeque<BytesMut>) -> RudisObject {
+        RudisObject::List(RudisList { value })
     }
 
     pub fn new_set() -> RudisObject {
         RudisObject::Set(RudisSet::new())
     }
 
+    pub fn new_set_from(value: HashSet<Bytes>) -> RudisObject {
+        RudisObject::Set(RudisSet { value })
+    }
+
     pub fn new_hash() -> RudisObject {
         RudisObject::Hash(RudisHash::new())
     }
 
+    pub fn new_hash_from(value: HashMap<Bytes, Bytes>) -> RudisObject {
+        RudisObject::Hash(RudisHash { value })
+    }
+
     pub fn new_zset() -> RudisObject {
         RudisObject::ZSet(RudisZSet::new())
+    }
+
+    pub fn new_zset_from(value: BTreeMap<Bytes, f64>) -> RudisObject {
+        RudisObject::ZSet(RudisZSet { value })
     }
 
     pub fn get_type(&self) -> &str {
@@ -148,10 +203,6 @@ impl RudisObject {
             RudisObject::Hash(_) => "hash",
             RudisObject::ZSet(_) => "zset",
         }
-    }
-
-    pub fn set_string(&mut self, value: RudisString) {
-        *self = RudisObject::String(value);
     }
 
     pub fn set_list(&mut self, value: RudisList) {
@@ -168,13 +219,6 @@ impl RudisObject {
 
     pub fn set_zset(&mut self, value: RudisZSet) {
         *self = RudisObject::ZSet(value);
-    }
-
-    pub fn get_string(&self) -> Option<&RudisString> {
-        match self {
-            RudisObject::String(value) => Some(value),
-            _ => None,
-        }
     }
 
     pub fn get_list(&self) -> Option<&RudisList> {
@@ -207,7 +251,7 @@ impl RudisObject {
 
     pub fn serialize(&self) -> Frame {
         match self {
-            RudisObject::String(value) => Frame::Bulk(value.get().clone()),
+            RudisObject::String(value) => Frame::Bulk((*value).clone().freeze()),
             _ => Frame::Error("not implemented".into()),
         }
     }

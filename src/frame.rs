@@ -14,6 +14,33 @@ pub enum Frame {
 }
 
 impl Frame {
+    pub fn new_array() -> Self {
+        Frame::Array(Vec::new())
+    }
+
+    pub fn new_bulk_from_slice(s: &[u8]) -> Result<Frame> {
+        Ok(Frame::Bulk(Bytes::copy_from_slice(s)))
+    }
+
+    pub fn new_bulk_from_bytes(s: Bytes) -> Result<Frame> {
+        Ok(Frame::Bulk(s))
+    }
+
+    pub fn new_integer_from(i: u64) -> Result<Frame> {
+        Ok(Frame::Integer(i))
+    }
+
+    pub fn sealed(self) -> Result<Frame> {
+        match self {
+            Frame::Bulk(b) => {
+                let mut array = Vec::new();
+                array.push(Frame::Bulk(b));
+                Ok(Frame::Array(array))
+            }
+            _ => Err(Error::new(ErrorKind::InvalidInput, "expect bulk frame")),
+        }
+    }
+
     fn next_line<'a>(src: &'a mut Cursor<&BytesMut>) -> Option<&'a [u8]> {
         let begin = src.position() as usize;
 
