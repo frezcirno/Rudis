@@ -1,4 +1,4 @@
-use mio::event::{self, Events};
+use mio::event::Events;
 use mio::net::TcpStream;
 use mio::{Interest, Poll, Token};
 use std::collections::HashMap;

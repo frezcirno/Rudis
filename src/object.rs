@@ -1,10 +1,7 @@
-use bytes::{Bytes, BytesMut};
-use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    ops::{Deref, DerefMut},
-};
-
 use crate::frame::Frame;
+use bytes::{Bytes, BytesMut};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::ops::{Deref, DerefMut};
 
 pub struct RudisString {
     pub value: BytesMut,
@@ -77,7 +74,7 @@ impl DerefMut for RudisSet {
 }
 
 pub struct RudisHash {
-    value: HashMap<Bytes, Bytes>,
+    value: HashMap<Bytes, BytesMut>,
 }
 
 impl RudisHash {
@@ -89,7 +86,7 @@ impl RudisHash {
 }
 
 impl Deref for RudisHash {
-    type Target = HashMap<Bytes, Bytes>;
+    type Target = HashMap<Bytes, BytesMut>;
 
     fn deref(&self) -> &Self::Target {
         &self.value
@@ -141,7 +138,7 @@ impl RudisObject {
         RudisObject::String(RudisString::from(BytesMut::new()))
     }
 
-    pub fn from_string(value: BytesMut) -> RudisObject {
+    pub fn new_string_from(value: BytesMut) -> RudisObject {
         RudisObject::String(RudisString::from(value))
     }
 
@@ -183,7 +180,7 @@ impl RudisObject {
         RudisObject::Hash(RudisHash::new())
     }
 
-    pub fn new_hash_from(value: HashMap<Bytes, Bytes>) -> RudisObject {
+    pub fn new_hash_from(value: HashMap<Bytes, BytesMut>) -> RudisObject {
         RudisObject::Hash(RudisHash { value })
     }
 

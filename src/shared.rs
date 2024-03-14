@@ -1,4 +1,5 @@
 #![allow(non_upper_case_globals)]
+
 use crate::frame::Frame;
 use bytes::Bytes;
 
@@ -12,4 +13,12 @@ pub const wrong_type_err: Frame = Frame::Error(Bytes::from_static(
     b"WRONGTYPE Operation against a key holding the wrong kind of value",
 ));
 pub const no_key_err: Frame = Frame::Error(Bytes::from_static(b"ERR no such key"));
+pub const protocol_err: Frame = Frame::Error(Bytes::from_static(b"ERR Protocol error"));
 pub const syntax_err: Frame = Frame::Error(Bytes::from_static(b"ERR syntax error"));
+
+pub(crate) fn timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}

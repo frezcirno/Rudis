@@ -12,5 +12,5 @@ lazy_static = "1.4.0"
 libc = "0.2.153"
 log = "0.4.21"
 rand = "0.8.5"
-tokio = { version = "1.36.0", features = ["net", "rt", "time", "macros", "io-util", "rt-multi-thread", "sync"] }
+tokio = { version = "1.36.0", features = ["net", "rt", "time", "macros", "io-util", "rt-multi-thread", "sync", "fs"] }
 toml = "0.8.10"

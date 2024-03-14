@@ -18,16 +18,20 @@ impl Frame {
         Frame::Array(Vec::new())
     }
 
-    pub fn new_bulk_from_slice(s: &[u8]) -> Result<Frame> {
-        Ok(Frame::Bulk(Bytes::copy_from_slice(s)))
+    pub fn new_bulk_from(s: impl Into<Bytes>) -> Frame {
+        Frame::Bulk(s.into())
     }
 
-    pub fn new_bulk_from_bytes(s: Bytes) -> Result<Frame> {
-        Ok(Frame::Bulk(s))
+    pub fn new_bulk_from_slice<'a>(s: impl Into<&'a [u8]>) -> Frame {
+        Frame::Bulk(Bytes::copy_from_slice(s.into()))
     }
 
-    pub fn new_integer_from(i: u64) -> Result<Frame> {
-        Ok(Frame::Integer(i))
+    // pub fn new_bulk_from_bytes(s: Bytes) -> Frame {
+    //     Frame::Bulk(s)
+    // }
+
+    pub fn new_integer_from(i: u64) -> Frame {
+        Frame::Integer(i)
     }
 
     pub fn sealed(self) -> Result<Frame> {

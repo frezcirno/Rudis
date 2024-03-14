@@ -32,7 +32,7 @@ impl HSet {
 
         match db.lookup_write(&self.key.clone()) {
             Some(RudisObject::Hash(h)) => {
-                h.insert(self.field, self.value);
+                h.insert(self.field, BytesMut::from_iter(self.value));
                 dst.write_frame(&Frame::Integer(1)).await?;
                 Ok(())
             }
@@ -45,7 +45,7 @@ impl HSet {
             }
             None => {
                 let mut h = std::collections::HashMap::new();
-                h.insert(self.field, self.value);
+                h.insert(self.field, BytesMut::from_iter(self.value));
                 db.insert(self.key.clone(), RudisObject::new_hash_from(h), None);
                 dst.write_frame(&Frame::Integer(1)).await?;
                 Ok(())
@@ -77,7 +77,7 @@ impl HGet {
         match db.lookup_read(&self.key) {
             Some(RudisObject::Hash(h)) => {
                 if let Some(value) = h.get(&self.field) {
-                    dst.write_frame(&Frame::Bulk(value.clone())).await?;
+                    dst.write_frame(&Frame::Bulk(value.clone().freeze())).await?;
                 } else {
                     dst.write_frame(&Frame::Null).await?;
                 }

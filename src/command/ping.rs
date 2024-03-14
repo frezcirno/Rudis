@@ -31,3 +31,12 @@ impl Ping {
         Ok(())
     }
 }
+
+#[derive(Debug)]
+pub struct Quit {}
+
+impl Quit {
+    pub fn from(frame: &mut CommandParser) -> Result<Self> {
+        Ok(Self {})
+    }
+}

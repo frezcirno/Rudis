@@ -32,7 +32,9 @@ fn set_locale() {
 async fn amain() {
     // print cwd
     let cwd = std::env::current_dir().unwrap();
-    println!("Current working directory: {}", cwd.display());
+    log::info!("cwd: {:?}", cwd);
+
+    
 
     let config = Config::from_toml("./rudis.toml");
     let server = Server::from_config(config).await;

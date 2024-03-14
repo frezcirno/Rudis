@@ -98,7 +98,7 @@ impl ListPop {
                     db.remove(&self.key);
                 }
                 if let Some(value) = response {
-                    dst.write_frame(&Frame::new_bulk_from_bytes(value.freeze())?.sealed()?)
+                    dst.write_frame(&Frame::new_bulk_from(value).sealed()?)
                         .await?;
                 } else {
                     dst.write_frame(&Frame::Null).await?;

@@ -1,6 +1,7 @@
 use super::CommandParser;
 use crate::db::Database;
 use crate::object::RudisObject;
+use crate::shared;
 use crate::{connection::Connection, frame::Frame};
 use bytes::Bytes;
 use std::io::{Error, ErrorKind, Result};
@@ -220,6 +221,134 @@ impl Rename {
                 Frame::Simple(Bytes::from_static(b"OK"))
             } else {
                 Frame::Error(Bytes::from_static(b"ERR no such key"))
+            }
+        };
+
+        dst.write_frame(&response).await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct Expire {
+    pub key: Bytes,
+    pub seconds: u64,
+}
+
+impl Expire {
+    pub fn from(frame: &mut CommandParser) -> Result<Self> {
+        let key = frame
+            .next_string()?
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "EXPIRE requires a key"))?;
+        let seconds = frame
+            .next_integer()?
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "EXPIRE requires a seconds"))?;
+        Ok(Self { key, seconds })
+    }
+
+    pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
+        let response = {
+            let mut db = db.lock().await;
+            if db.expire_at(&self.key, 1000 * self.seconds + shared::timestamp()) {
+                Frame::Integer(1)
+            } else {
+                Frame::Integer(0)
+            }
+        };
+
+        dst.write_frame(&response).await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct ExpireAt {
+    pub key: Bytes,
+    pub timestamp: u64,
+}
+
+impl ExpireAt {
+    pub fn from(frame: &mut CommandParser) -> Result<Self> {
+        let key = frame
+            .next_string()?
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "EXPIREAT requires a key"))?;
+        let timestamp = frame
+            .next_integer()?
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "EXPIREAT requires a timestamp"))?;
+        Ok(Self { key, timestamp })
+    }
+
+    pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
+        let response = {
+            let mut db = db.lock().await;
+            if db.expire_at(&self.key, 1000 * self.timestamp) {
+                Frame::Integer(1)
+            } else {
+                Frame::Integer(0)
+            }
+        };
+
+        dst.write_frame(&response).await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct PExpire {
+    pub key: Bytes,
+    pub milliseconds: u64,
+}
+
+impl PExpire {
+    pub fn from(frame: &mut CommandParser) -> Result<Self> {
+        let key = frame
+            .next_string()?
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "PEXPIRE requires a key"))?;
+        let milliseconds = frame.next_integer()?.ok_or_else(|| {
+            Error::new(ErrorKind::InvalidInput, "PEXPIRE requires a milliseconds")
+        })?;
+        Ok(Self { key, milliseconds })
+    }
+
+    pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
+        let response = {
+            let mut db = db.lock().await;
+            if db.expire_at(&self.key, self.milliseconds + shared::timestamp()) {
+                Frame::Integer(1)
+            } else {
+                Frame::Integer(0)
+            }
+        };
+
+        dst.write_frame(&response).await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct PExpireAt {
+    pub key: Bytes,
+    pub timestamp: u64,
+}
+
+impl PExpireAt {
+    pub fn from(frame: &mut CommandParser) -> Result<Self> {
+        let key = frame
+            .next_string()?
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "PEXPIREAT requires a key"))?;
+        let timestamp = frame
+            .next_integer()?
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "PEXPIREAT requires a timestamp"))?;
+        Ok(Self { key, timestamp })
+    }
+
+    pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
+        let response = {
+            let mut db = db.lock().await;
+            if db.expire_at(&self.key, self.timestamp) {
+                Frame::Integer(1)
+            } else {
+                Frame::Integer(0)
             }
         };
 

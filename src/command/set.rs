@@ -35,7 +35,7 @@ impl SAdd {
                         added += 1;
                     }
                 }
-                dst.write_frame(&Frame::new_integer_from(added as u64)?)
+                dst.write_frame(&Frame::new_integer_from(added as u64))
                     .await?;
                 Ok(())
             }
@@ -53,7 +53,7 @@ impl SAdd {
                     s.insert(member);
                 }
                 db.insert(self.key.clone(), RudisObject::new_set_from(s), None);
-                dst.write_frame(&Frame::new_integer_from(len as u64)?)
+                dst.write_frame(&Frame::new_integer_from(len as u64))
                     .await?;
                 Ok(())
             }

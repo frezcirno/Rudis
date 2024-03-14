@@ -1,9 +1,8 @@
 use crate::command::Command;
+use crate::config::Config;
 use crate::connection::Connection;
-use crate::db::Database;
-use crate::frame::Frame;
+use crate::db::{Database, Databases};
 use crate::shared;
-use bytes::Bytes;
 use std::io::Result;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -21,7 +20,8 @@ pub struct ClientInner {
 }
 
 pub struct Client {
-    pub dbs: Arc<Vec<Database>>,
+    pub config: Arc<RwLock<Config>>,
+    pub dbs: Databases,
     pub index: usize,
     pub db: Database,
     pub connection: Connection,
@@ -45,7 +45,7 @@ impl Client {
         let _ = self.handle_client().await;
     }
 
-    fn select(&mut self, index: usize) -> Result<()> {
+    pub(crate) fn select(&mut self, index: usize) -> Result<()> {
         if index >= self.dbs.len() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -60,9 +60,19 @@ impl Client {
     pub async fn handle_client(&mut self) -> Result<()> {
         while !self.quit.load(Ordering::Relaxed) {
             let maybe_frame = tokio::select! {
-                frame = self.connection.read_frame() => frame?,
+                maybe_err_frame = self.connection.read_frame() => {
+                    // illegal frame
+                    match maybe_err_frame {
+                        Ok(f) => f,
+                        Err(e) => {
+                            self.connection.write_frame(&shared::protocol_err).await?;
+                            log::error!("read frame error: {:?}", e);
+                            return Ok(());
+                        }
+                    }
+                },
                 _ = self.quit_ch.recv() => {
-                    log::debug!("client quit");
+                    log::debug!("server quit");
                     return Ok(());
                 },
             };
@@ -72,39 +82,21 @@ impl Client {
                 None => return Ok(()),
             };
 
-            let cmd = Command::from(frame)?;
+            let cmd = {
+                let maybe_cmd = Command::from(frame);
+                match maybe_cmd {
+                    Ok(cmd) => cmd,
+                    Err(e) => {
+                        self.connection.write_frame(&shared::syntax_err).await?;
+                        log::error!("parse command error: {:?}", e);
+                        continue;
+                    }
+                }
+            };
 
             log::debug!("client command: {:?}", cmd);
 
-            // process special commands
-            match cmd {
-                Command::Select(cmd) => {
-                    if let Ok(()) = self.select(cmd.index as usize) {
-                        self.connection.write_frame(&shared::ok).await?;
-                    } else {
-                        self.connection
-                            .write_frame(&Frame::Error(Bytes::from_static(b"ERR invalid db index")))
-                            .await?;
-                    }
-
-                    continue;
-                }
-                Command::DbSize(_) => {
-                    let len = self.dbs.len();
-                    self.connection
-                        .write_frame(&Frame::Integer(len as u64))
-                        .await?;
-                    continue;
-                }
-                // Command::Quit(_) => {
-                //     self.quit.store(true, Ordering::Relaxed);
-                //     self.connection.write_frame(&shared::ok).await?;
-                //     return Ok(());
-                // }
-                _ => {}
-            };
-
-            cmd.apply(&self.db, &mut self.connection).await?;
+            self.execute_cmd(cmd).await?;
         }
 
         Ok(())

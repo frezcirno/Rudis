@@ -115,7 +115,7 @@ impl Set {
 
             dst.write_frame(&shared::null_bulk).await.unwrap();
         } else {
-            let value = RudisObject::from_string(self.val);
+            let value = RudisObject::new_string_from(self.val);
             db.insert(self.key, value, self.expire);
             drop(db);
 
@@ -164,7 +164,7 @@ impl Append {
             } else {
                 let mut_val: BytesMut = BytesMut::from(&self.value[..]);
                 lock.dict
-                    .insert(self.key.clone(), RudisObject::from_string(mut_val));
+                    .insert(self.key.clone(), RudisObject::new_string_from(mut_val));
                 Frame::Integer(self.value.len() as u64)
             }
         };

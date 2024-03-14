@@ -1,33 +1,119 @@
+use crate::aof::{AofFsync, AofState};
+use crate::config::Config;
 use crate::object::RudisObject;
+use crate::rdb::{AutoSave, Rdb};
+use crate::shared;
 use bytes::Bytes;
 use std::collections::HashMap;
+use std::io::ErrorKind;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::fs::File;
+use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
 
 static mut ID: AtomicU32 = AtomicU32::new(0);
 
+#[derive(Default)]
+pub struct Databases {
+    pub config: Arc<RwLock<Config>>,
+    pub inner: Arc<Vec<Database>>,
+    pub rdb_save_task: Option<JoinHandle<()>>,
+    pub aof_state: AofState,
+    pub aof_fsync: AofFsync,
+    pub aof_rewrite_task: Option<JoinHandle<()>>,
+    pub aof_rewrite_scheduled: bool,
+    pub dirty: u64,
+    pub dirty_before_bgsave: u64,
+    pub unix_time: u64,
+    pub last_save_time: u64,
+    pub save_params: Vec<AutoSave>,
+}
+
+impl Databases {
+    pub async fn new(config: Arc<RwLock<Config>>) -> Databases {
+        let db_num = config.read().await.db_num;
+        let mut v = Vec::with_capacity(db_num);
+        for _ in 0..db_num {
+            v.push(Database::new());
+        }
+        Databases {
+            config,
+            inner: Arc::new(v),
+            ..Default::default()
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn get(&self, index: usize) -> Database {
+        self.inner[index].clone()
+    }
+
+    pub fn clone(&self) -> Databases {
+        Databases {
+            inner: self.inner.clone(),
+            ..Default::default()
+        }
+    }
+
+    pub async fn load_data_from_disk(&mut self) {
+        if self.aof_state == AofState::On {
+            // TODO
+        } else {
+            match File::open(&self.config.clone().read().await.rdb_filename).await {
+                Ok(file) => {
+                    if let Ok(()) = self.load(&mut Rdb::from_file(file)).await {
+                        log::info!("DB loaded from disk: bad file format?");
+                    } else {
+                        log::error!("Error loading DB from disk");
+                    }
+                }
+                Err(err) => {
+                    if err.kind() != ErrorKind::NotFound {
+                        log::error!("Error loading DB from disk: {:?}", err);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn should_save(&self) -> bool {
+        let time_to_last_save = self.unix_time - self.last_save_time;
+        for saveparam in &self.save_params {
+            if self.dirty >= saveparam.changes && time_to_last_save >= saveparam.seconds {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl Deref for Databases {
+    type Target = Vec<Database>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
 pub struct Database {
+    pub index: u32,
     inner: Arc<Mutex<DatabaseInner>>,
 }
 
 pub struct DatabaseInner {
-    pub id: u32,
     pub dict: HashMap<Bytes, RudisObject>,
     pub expires: HashMap<Bytes, u64>, // millisecond timestamp
-}
-
-fn timestamps() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
 }
 
 impl DatabaseInner {
     fn check_expired(&mut self, key: &Bytes) -> bool {
         if let Some(t) = self.expires.get(key) {
-            let now = timestamps();
+            let now = shared::timestamp();
             if now > *t {
                 self.dict.remove(key);
                 self.expires.remove(key);
@@ -74,7 +160,7 @@ impl DatabaseInner {
         self.dict.insert(key.clone(), value);
 
         if let Some(expire) = expire {
-            let now = timestamps();
+            let now = shared::timestamp();
             self.expires.insert(key, now + expire);
         }
     }
@@ -91,13 +177,22 @@ impl DatabaseInner {
             false
         }
     }
+
+    pub fn expire_at(&mut self, key: &Bytes, expire_at_ms: u64) -> bool {
+        if self.dict.contains_key(key) {
+            self.expires.insert(key.clone(), expire_at_ms);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl Database {
     pub fn new() -> Database {
         Database {
+            index: unsafe { ID.fetch_add(1, Ordering::Relaxed) },
             inner: Arc::new(Mutex::new(DatabaseInner {
-                id: unsafe { ID.fetch_add(1, Ordering::Relaxed) },
                 dict: HashMap::new(),
                 expires: HashMap::new(),
             })),
@@ -106,6 +201,7 @@ impl Database {
 
     pub fn clone(&self) -> Database {
         Database {
+            index: self.index,
             inner: self.inner.clone(),
         }
     }

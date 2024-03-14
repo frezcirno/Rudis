@@ -1,3 +1,4 @@
+pub mod aof;
 pub mod client;
 pub mod command;
 pub mod config;
@@ -5,5 +6,6 @@ pub mod connection;
 pub mod db;
 pub mod frame;
 pub mod object;
+pub mod rdb;
 pub mod server;
 pub mod shared;
