@@ -1,9 +1,9 @@
-use crate::aof::{AofFsync, AofState};
+use crate::aof::{AofFsync, AofState, AofWriter};
 use crate::config::Config;
 use crate::object::RudisObject;
 use crate::rdb::{AutoSave, Rdb};
 use crate::shared;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::ops::Deref;
@@ -19,16 +19,30 @@ static mut ID: AtomicU32 = AtomicU32::new(0);
 pub struct Databases {
     pub config: Arc<RwLock<Config>>,
     pub inner: Arc<Vec<Database>>,
+
+    pub clock_ms: u64,
+
+    pub save_params: Vec<AutoSave>,
+    pub last_save_time: u64,
     pub rdb_save_task: Option<JoinHandle<()>>,
-    pub aof_state: AofState,
-    pub aof_fsync: AofFsync,
-    pub aof_rewrite_task: Option<JoinHandle<()>>,
-    pub aof_rewrite_scheduled: bool,
+
     pub dirty: u64,
     pub dirty_before_bgsave: u64,
-    pub unix_time: u64,
-    pub last_save_time: u64,
-    pub save_params: Vec<AutoSave>,
+
+    pub aof_state: AofState,
+    pub aof_buf: AofWriter,
+    pub aof_file: Option<File>,
+    pub aof_current_size: u64,       // current size of the aof file
+    pub aof_last_write_status: bool, // true if last write was ok
+
+    pub aof_selected_db: u32,
+
+    pub aof_fsync: AofFsync,
+    pub aof_last_fsync: u64, // unit: ms
+
+    pub aof_rewrite_task: Option<JoinHandle<()>>,
+    pub aof_rewrite_buf_blocks: BytesMut,
+    pub aof_rewrite_scheduled: bool,
 }
 
 impl Databases {
@@ -82,7 +96,7 @@ impl Databases {
     }
 
     pub fn should_save(&self) -> bool {
-        let time_to_last_save = self.unix_time - self.last_save_time;
+        let time_to_last_save = self.clock_ms - self.last_save_time;
         for saveparam in &self.save_params {
             if self.dirty >= saveparam.changes && time_to_last_save >= saveparam.seconds {
                 return true;
@@ -113,7 +127,7 @@ pub struct DatabaseInner {
 impl DatabaseInner {
     fn check_expired(&mut self, key: &Bytes) -> bool {
         if let Some(t) = self.expires.get(key) {
-            let now = shared::timestamp();
+            let now = shared::now_ms();
             if now > *t {
                 self.dict.remove(key);
                 self.expires.remove(key);
@@ -160,7 +174,7 @@ impl DatabaseInner {
         self.dict.insert(key.clone(), value);
 
         if let Some(expire) = expire {
-            let now = shared::timestamp();
+            let now = shared::now_ms();
             self.expires.insert(key, now + expire);
         }
     }

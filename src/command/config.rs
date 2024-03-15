@@ -5,7 +5,7 @@ use crate::{connection::Connection, frame::Frame};
 use bytes::Bytes;
 use std::io::{Error, ErrorKind, Result};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConfigSet {
     pub key: Bytes,
     pub value: Bytes,
@@ -23,7 +23,7 @@ impl ConfigSet {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConfigGet {
     pub key: Bytes,
 }
@@ -37,7 +37,7 @@ impl ConfigGet {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConfigResetStat {}
 
 impl ConfigResetStat {
@@ -46,7 +46,7 @@ impl ConfigResetStat {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConfigRewrite {}
 
 impl ConfigRewrite {

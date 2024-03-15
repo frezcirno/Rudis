@@ -6,7 +6,7 @@ use crate::{connection::Connection, frame::Frame};
 use bytes::{Bytes, BytesMut};
 use std::io::{Error, ErrorKind, Result};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SAdd {
     pub key: Bytes,
     pub members: Vec<Bytes>,
@@ -59,9 +59,21 @@ impl SAdd {
             }
         }
     }
+
+    pub fn rewrite(&self) -> BytesMut {
+        let mut out = BytesMut::new();
+        // SADD key [member ...]
+        shared::extend_array(&mut out, 2 + self.members.len());
+        shared::extend_bulk_string(&mut out, b"SADD" as &[u8]);
+        shared::extend_bulk_string(&mut out, &self.key[..]);
+        for member in &self.members {
+            shared::extend_bulk_string(&mut out, &member[..]);
+        }
+        out
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SRem {
     pub key: Bytes,
     pub members: Vec<Bytes>,
@@ -105,5 +117,17 @@ impl SRem {
                 Ok(())
             }
         }
+    }
+
+    pub fn rewrite(&self) -> BytesMut {
+        let mut out = BytesMut::new();
+        // SREM key [member ...]
+        shared::extend_array(&mut out, 2 + self.members.len());
+        shared::extend_bulk_string(&mut out, b"SREM" as &[u8]);
+        shared::extend_bulk_string(&mut out, &self.key[..]);
+        for member in &self.members {
+            shared::extend_bulk_string(&mut out, &member[..]);
+        }
+        out
     }
 }

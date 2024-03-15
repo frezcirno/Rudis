@@ -26,6 +26,7 @@ pub struct Config {
     pub bindaddr: String,
     pub port: u16,
     pub rdb_filename: String,
+    pub aof_filename: String,
     pub db_num: usize,
     pub hz: usize,
     pub verbosity: Verbosity,
@@ -37,6 +38,7 @@ impl Default for Config {
             bindaddr: "0.0.0.0".to_owned(),
             port: 6379,
             rdb_filename: "dump.rdb".to_owned(),
+            aof_filename: "appendonly.aof".to_owned(),
             db_num: 16,
             hz: 10,
             verbosity: Verbosity::Normal,
@@ -56,10 +58,17 @@ impl Config {
             .as_str()
             .unwrap()
             .to_string();
+        let aof_filename = table
+            .get("aof_filename")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
         Config {
             bindaddr,
             port,
             rdb_filename,
+            aof_filename,
             db_num: 16,
             hz: 10,
             verbosity: Verbosity::Normal,

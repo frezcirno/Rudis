@@ -7,7 +7,7 @@ use bytes::{Bytes, BytesMut};
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Result};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ListPush {
     pub key: Bytes,
     pub values: Vec<BytesMut>,
@@ -68,9 +68,32 @@ impl ListPush {
             }
         }
     }
+
+    pub fn rewrite(&self) -> BytesMut {
+        // L/RPUSH key [value ...]
+        let mut out = BytesMut::new();
+
+        shared::extend_array(&mut out, 2 + self.values.len());
+
+        // cmd
+        shared::extend_bulk_string(
+            &mut out,
+            if self.left { b"LPUSH" } else { b"RPUSH" } as &[u8],
+        );
+
+        // key
+        shared::extend_bulk_string(&mut out, &self.key[..]);
+
+        // value
+        for value in &self.values {
+            shared::extend_bulk_string(&mut out, &value[..]);
+        }
+
+        out
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ListPop {
     pub key: Bytes,
     pub left: bool,
@@ -117,5 +140,20 @@ impl ListPop {
                 Ok(())
             }
         }
+    }
+
+    pub fn rewrite(&self) -> BytesMut {
+        // L/RPOP key
+        let mut out = BytesMut::new();
+
+        shared::extend_array(&mut out, 2);
+
+        // cmd
+        shared::extend_bulk_string(&mut out, if self.left { b"LPOP" } else { b"RPOP" } as &[u8]);
+
+        // key
+        shared::extend_bulk_string(&mut out, &self.key[..]);
+
+        out
     }
 }

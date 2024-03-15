@@ -6,7 +6,7 @@ use crate::{connection::Connection, frame::Frame};
 use bytes::{Bytes, BytesMut};
 use std::io::{Error, ErrorKind, Result};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HSet {
     pub key: Bytes,
     pub field: Bytes,
@@ -52,9 +52,19 @@ impl HSet {
             }
         }
     }
+
+    pub fn rewrite(&self) -> BytesMut {
+        let mut out = BytesMut::new();
+        shared::extend_array(&mut out, 4);
+        shared::extend_bulk_string(&mut out, b"HSET" as &[u8]);
+        shared::extend_bulk_string(&mut out, &self.key[..]);
+        shared::extend_bulk_string(&mut out, &self.field[..]);
+        shared::extend_bulk_string(&mut out, &self.value[..]);
+        out
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HGet {
     pub key: Bytes,
     pub field: Bytes,
@@ -77,7 +87,8 @@ impl HGet {
         match db.lookup_read(&self.key) {
             Some(RudisObject::Hash(h)) => {
                 if let Some(value) = h.get(&self.field) {
-                    dst.write_frame(&Frame::Bulk(value.clone().freeze())).await?;
+                    dst.write_frame(&Frame::Bulk(value.clone().freeze()))
+                        .await?;
                 } else {
                     dst.write_frame(&Frame::Null).await?;
                 }

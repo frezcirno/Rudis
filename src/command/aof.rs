@@ -5,7 +5,7 @@ use crate::{connection::Connection, frame::Frame};
 use bytes::Bytes;
 use std::io::{Error, ErrorKind, Result};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BgRewriteAof {}
 
 impl BgRewriteAof {

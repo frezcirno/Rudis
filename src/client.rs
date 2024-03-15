@@ -1,3 +1,4 @@
+use crate::aof::AofState;
 use crate::command::Command;
 use crate::config::Config;
 use crate::connection::Connection;
@@ -22,7 +23,6 @@ pub struct ClientInner {
 pub struct Client {
     pub config: Arc<RwLock<Config>>,
     pub dbs: Databases,
-    pub index: usize,
     pub db: Database,
     pub connection: Connection,
     pub address: SocketAddr,
@@ -45,14 +45,13 @@ impl Client {
         let _ = self.handle_client().await;
     }
 
-    pub(crate) fn select(&mut self, index: usize) -> Result<()> {
+    pub fn select(&mut self, index: usize) -> Result<()> {
         if index >= self.dbs.len() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "invalid db index",
             ));
         }
-        self.index = index;
         self.db = self.dbs[index].clone();
         Ok(())
     }
@@ -94,11 +93,28 @@ impl Client {
                 }
             };
 
+            // TODO: check auth
+
             log::debug!("client command: {:?}", cmd);
 
-            self.execute_cmd(cmd).await?;
+            // TODO: check memory
+
+            // TODO: check last write disk status
+
+            // TODO: check if the server is loading
+
+            self.execute_cmd(cmd.clone()).await;
+
+            // propagate
+            self.propagate(cmd).await;
         }
 
         Ok(())
+    }
+
+    async fn propagate(&mut self, cmd: Command) {
+        if self.dbs.aof_state != AofState::On {
+            self.dbs.feed_append_only_file(cmd, self.db.index).await;
+        }
     }
 }

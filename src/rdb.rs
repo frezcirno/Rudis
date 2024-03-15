@@ -3,11 +3,13 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Display;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::db::Databases;
 use crate::object::RudisObject;
+use crate::server::Server;
 use crate::shared;
 
 const REDIS_RDB_TYPE_STRING: u8 = 0;
@@ -31,8 +33,8 @@ const REDIS_RDB_OPCODE_SELECTDB: u8 = 254;
 const REDIS_RDB_OPCODE_EOF: u8 = 255;
 
 pub struct AutoSave {
-    pub(crate) seconds: u64,
-    pub(crate) changes: u64,
+    pub seconds: u64,
+    pub changes: u64,
 }
 
 impl Display for AutoSave {
@@ -210,7 +212,7 @@ impl DerefMut for Rdb {
 
 impl Databases {
     pub async fn save(&self, rdb: &mut Rdb) -> Result<()> {
-        let now = shared::timestamp();
+        let now = shared::now_ms();
 
         // write magic
         let magic = b"REDIS0006";
@@ -240,7 +242,7 @@ impl Databases {
     }
 
     pub async fn load(&mut self, rdb: &mut Rdb) -> Result<()> {
-        let now = shared::timestamp();
+        let now = shared::now_ms();
 
         // read magic
         let mut buf = [0u8; 9];
@@ -299,5 +301,13 @@ impl Databases {
         }
 
         Ok(())
+    }
+}
+
+impl Server {
+    pub async fn background_save_done(self: &Arc<Self>, dbs: &mut Databases) {
+        log::info!("Background save done");
+
+        dbs.rdb_save_task = None;
     }
 }

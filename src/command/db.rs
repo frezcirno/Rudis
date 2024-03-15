@@ -3,10 +3,10 @@ use crate::db::Database;
 use crate::object::RudisObject;
 use crate::shared;
 use crate::{connection::Connection, frame::Frame};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::io::{Error, ErrorKind, Result};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Del {
     pub keys: Vec<Bytes>,
 }
@@ -42,9 +42,19 @@ impl Del {
         dst.write_frame(&Frame::Integer(count)).await?;
         Ok(())
     }
+
+    pub fn rewrite(&self) -> BytesMut {
+        let mut out = BytesMut::new();
+        shared::extend_array(&mut out, 1 + self.keys.len() as usize);
+        shared::extend_bulk_string(&mut out, b"DEL" as &[u8]);
+        for key in &self.keys {
+            shared::extend_bulk_string(&mut out, &key[..]);
+        }
+        out
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Exists {
     pub key: Bytes,
 }
@@ -72,7 +82,7 @@ impl Exists {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Select {
     pub index: u64,
 }
@@ -86,7 +96,7 @@ impl Select {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Keys {
     pub pattern: Bytes,
 }
@@ -117,7 +127,7 @@ impl Keys {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DbSize {}
 
 impl DbSize {
@@ -126,7 +136,7 @@ impl DbSize {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Type {
     pub key: Bytes,
 }
@@ -160,7 +170,7 @@ impl Type {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Shutdown {
     pub save: bool,
 }
@@ -190,7 +200,7 @@ impl Shutdown {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Rename {
     pub key: Bytes,
     pub newkey: Bytes,
@@ -227,9 +237,18 @@ impl Rename {
         dst.write_frame(&response).await?;
         Ok(())
     }
+
+    pub fn rewrite(&self) -> BytesMut {
+        let mut out = BytesMut::new();
+        shared::extend_array(&mut out, 3);
+        shared::extend_bulk_string(&mut out, b"RENAME" as &[u8]);
+        shared::extend_bulk_string(&mut out, &self.key[..]);
+        shared::extend_bulk_string(&mut out, &self.newkey[..]);
+        out
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Expire {
     pub key: Bytes,
     pub seconds: u64,
@@ -246,10 +265,14 @@ impl Expire {
         Ok(Self { key, seconds })
     }
 
+    pub fn expire_at_ms(&self) -> u64 {
+        1000 * self.seconds + shared::now_ms()
+    }
+
     pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
         let response = {
             let mut db = db.lock().await;
-            if db.expire_at(&self.key, 1000 * self.seconds + shared::timestamp()) {
+            if db.expire_at(&self.key, self.expire_at_ms()) {
                 Frame::Integer(1)
             } else {
                 Frame::Integer(0)
@@ -259,9 +282,18 @@ impl Expire {
         dst.write_frame(&response).await?;
         Ok(())
     }
+
+    pub fn rewrite(&self) -> BytesMut {
+        let mut out = BytesMut::new();
+        shared::extend_array(&mut out, 3);
+        shared::extend_bulk_string(&mut out, b"PEXPIREAT" as &[u8]);
+        shared::extend_bulk_string(&mut out, &self.key[..]);
+        shared::extend_bulk_string(&mut out, self.expire_at_ms().to_string().as_bytes());
+        out
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExpireAt {
     pub key: Bytes,
     pub timestamp: u64,
@@ -278,10 +310,14 @@ impl ExpireAt {
         Ok(Self { key, timestamp })
     }
 
+    pub fn expire_at_ms(&self) -> u64 {
+        1000 * self.timestamp
+    }
+
     pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
         let response = {
             let mut db = db.lock().await;
-            if db.expire_at(&self.key, 1000 * self.timestamp) {
+            if db.expire_at(&self.key, self.expire_at_ms()) {
                 Frame::Integer(1)
             } else {
                 Frame::Integer(0)
@@ -291,9 +327,18 @@ impl ExpireAt {
         dst.write_frame(&response).await?;
         Ok(())
     }
+
+    pub fn rewrite(&self) -> BytesMut {
+        let mut out = BytesMut::new();
+        shared::extend_array(&mut out, 3);
+        shared::extend_bulk_string(&mut out, b"PEXPIREAT" as &[u8]);
+        shared::extend_bulk_string(&mut out, &self.key[..]);
+        shared::extend_bulk_string(&mut out, self.expire_at_ms().to_string().as_bytes());
+        out
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PExpire {
     pub key: Bytes,
     pub milliseconds: u64,
@@ -310,10 +355,14 @@ impl PExpire {
         Ok(Self { key, milliseconds })
     }
 
+    pub fn expire_at_ms(&self) -> u64 {
+        self.milliseconds + shared::now_ms()
+    }
+
     pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
         let response = {
             let mut db = db.lock().await;
-            if db.expire_at(&self.key, self.milliseconds + shared::timestamp()) {
+            if db.expire_at(&self.key, self.expire_at_ms()) {
                 Frame::Integer(1)
             } else {
                 Frame::Integer(0)
@@ -323,9 +372,18 @@ impl PExpire {
         dst.write_frame(&response).await?;
         Ok(())
     }
+
+    pub fn rewrite(&self) -> BytesMut {
+        let mut out = BytesMut::new();
+        shared::extend_array(&mut out, 3);
+        shared::extend_bulk_string(&mut out, b"PEXPIREAT" as &[u8]);
+        shared::extend_bulk_string(&mut out, &self.key[..]);
+        shared::extend_bulk_string(&mut out, self.expire_at_ms().to_string().as_bytes());
+        out
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PExpireAt {
     pub key: Bytes,
     pub timestamp: u64,
@@ -342,10 +400,14 @@ impl PExpireAt {
         Ok(Self { key, timestamp })
     }
 
+    pub fn expire_at_ms(&self) -> u64 {
+        self.timestamp
+    }
+
     pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
         let response = {
             let mut db = db.lock().await;
-            if db.expire_at(&self.key, self.timestamp) {
+            if db.expire_at(&self.key, self.expire_at_ms()) {
                 Frame::Integer(1)
             } else {
                 Frame::Integer(0)
@@ -354,5 +416,14 @@ impl PExpireAt {
 
         dst.write_frame(&response).await?;
         Ok(())
+    }
+
+    pub fn rewrite(&self) -> BytesMut {
+        let mut out = BytesMut::new();
+        shared::extend_array(&mut out, 3);
+        shared::extend_bulk_string(&mut out, b"PEXPIREAT" as &[u8]);
+        shared::extend_bulk_string(&mut out, &self.key[..]);
+        shared::extend_bulk_string(&mut out, self.expire_at_ms().to_string().as_bytes());
+        out
     }
 }

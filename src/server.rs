@@ -1,8 +1,9 @@
 use crate::client::{Client, ClientInner};
 use crate::config::Config;
 use crate::connection::Connection;
-use crate::db::{Database, Databases};
+use crate::db::Databases;
 use crate::rdb::Rdb;
+use crate::shared;
 use log;
 use std::io::{Error, ErrorKind, Result};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -13,28 +14,14 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, RwLock};
 use tokio::time::sleep;
 
-fn gen_runid() -> String {
-    use rand::distributions::Alphanumeric;
-    use rand::{thread_rng, Rng};
-
-    let mut rng = thread_rng();
-    let runid: String = (&mut rng)
-        .sample_iter(&Alphanumeric)
-        .take(40)
-        .map(char::from)
-        .collect();
-
-    runid
-}
-
 #[derive(Default)]
 pub struct RudisServerInner {
     pub runid: String,
 }
 
 pub struct Server {
-    pub dbs: Databases,
     pub config: Arc<RwLock<Config>>,
+    pub dbs: Databases,
     pub inner: RwLock<RudisServerInner>,
     pub quit_ch: broadcast::Sender<()>,
 }
@@ -49,7 +36,9 @@ impl Server {
         let server = Server {
             dbs,
             config,
-            inner: RwLock::new(RudisServerInner { runid: gen_runid() }),
+            inner: RwLock::new(RudisServerInner {
+                runid: shared::gen_runid(),
+            }),
             quit_ch: broadcast::channel(1).0,
         };
 
@@ -75,6 +64,17 @@ impl Server {
             });
         }
 
+        {
+            let self_clone = self.clone();
+            let mut dbs_clone = self.dbs.clone();
+            tokio::spawn(async move {
+                loop {
+                    self_clone.before_sleep(&mut dbs_clone).await;
+                    sleep(Duration::from_millis(100)).await;
+                }
+            });
+        }
+
         let host = self
             .config
             .read()
@@ -93,7 +93,6 @@ impl Server {
                     let mut c = Client {
                         config: self.config.clone(),
                         dbs: self.dbs.clone(),
-                        index: 0,
                         db: self.dbs[0].clone(),
                         connection: Connection::from(connection),
                         address,
@@ -122,6 +121,11 @@ impl Server {
         }
     }
 
+    async fn before_sleep(self: &Arc<Self>, dbs: &mut Databases) {
+        
+        dbs.flush_append_only_file().await;
+    }
+
     async fn track_operations_per_second(self: &Arc<Self>) {
         // let mut inner = self.inner.write().await;
         // inner.dirty = 0;
@@ -129,6 +133,9 @@ impl Server {
 
     async fn server_cron(self: &Arc<Self>, dbs: &mut Databases, cronloops: u64) -> Option<u64> {
         let period_ms = 1000 / self.config.read().await.hz as u64;
+
+        // update clock
+        dbs.clock_ms = shared::now_ms();
 
         // 100 ms: track operations per second
         if 100 <= period_ms || cronloops % (100 / period_ms) == 0 {
@@ -162,7 +169,7 @@ impl Server {
 
         if dbs.rdb_save_task.is_none() && dbs.aof_rewrite_task.is_none() {
             if dbs.aof_rewrite_scheduled {
-                dbs.rewrite_aof_bg().await;
+                dbs.rewrite_append_only_file_background().await;
             }
         }
 
@@ -174,7 +181,7 @@ impl Server {
         } else if let Some(aof_rewrite_task) = &dbs.aof_rewrite_task {
             // clean up finished background rewrite
             if aof_rewrite_task.is_finished() {
-                self.background_rewrite_done(dbs).await;
+                self.background_rewrite_done_handler(dbs).await;
             }
         } else {
             // check if we need to start a background save
@@ -199,18 +206,6 @@ impl Server {
         }
 
         Some(period_ms)
-    }
-
-    async fn background_save_done(self: &Arc<Self>, dbs: &mut Databases) {
-        log::info!("Background save done");
-
-        dbs.rdb_save_task = None;
-    }
-
-    async fn background_rewrite_done(self: &Arc<Self>, dbs: &mut Databases) {
-        log::info!("Background rewrite done");
-
-        dbs.aof_rewrite_task = None;
     }
 
     async fn clients_cron(self: &Arc<Self>, cronloops: u64) {}

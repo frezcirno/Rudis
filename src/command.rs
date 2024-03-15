@@ -82,7 +82,7 @@ impl CommandParser {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Command {
     Ping(Ping),
     Quit(Quit),
@@ -212,7 +212,7 @@ impl Command {
 }
 
 impl Client {
-    pub(crate) async fn execute_cmd(&mut self, cmd: Command) -> Result<()> {
+    pub async fn execute_cmd(&mut self, cmd: Command) -> Result<()> {
         match cmd {
             Command::Select(cmd) => {
                 if let Ok(()) = self.select(cmd.index as usize) {
@@ -276,7 +276,7 @@ impl Client {
                     self.connection
                         .write_frame(&Frame::Simple(Bytes::from_static(b"BgAofRewrite schduled")))
                         .await?;
-                } else if self.dbs.rewrite_aof_bg().await.is_err() {
+                } else if self.dbs.rewrite_append_only_file_background().await.is_err() {
                     self.connection
                         .write_frame(&Frame::Error(Bytes::from_static(
                             b"ERR background rewrite error",

@@ -6,7 +6,7 @@ use crate::{connection::Connection, frame::Frame};
 use bytes::{Bytes, BytesMut};
 use std::io::{Error, ErrorKind, Result};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Save {}
 
 impl Save {
@@ -15,7 +15,7 @@ impl Save {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BgSave {}
 
 impl BgSave {

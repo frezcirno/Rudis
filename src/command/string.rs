@@ -6,7 +6,7 @@ use crate::{connection::Connection, frame::Frame};
 use bytes::{Bytes, BytesMut};
 use std::io::{Error, ErrorKind, Result};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Get {
     pub key: Bytes,
 }
@@ -44,7 +44,7 @@ const REDIS_SET_NO_FLAGS: u32 = 0;
 const REDIS_SET_NX: u32 = 1 << 0; /* Set if key not exists. */
 const REDIS_SET_XX: u32 = 1 << 1; /* Set if key exists. */
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Set {
     pub key: Bytes,
     pub val: BytesMut,
@@ -123,9 +123,22 @@ impl Set {
         }
         Ok(())
     }
+
+    pub fn rewrite(&self) -> BytesMut {
+        let mut out = BytesMut::new();
+        shared::extend_array(&mut out, 3 + if self.expire.is_some() { 2 } else { 0 });
+        shared::extend_bulk_string(&mut out, b"SET" as &[u8]);
+        shared::extend_bulk_string(&mut out, &self.key[..]);
+        shared::extend_bulk_string(&mut out, &self.val[..]);
+        if let Some(expire) = self.expire {
+            shared::extend_bulk_string(&mut out, b"PX" as &[u8]);
+            shared::extend_bulk_string(&mut out, expire.to_string().as_bytes());
+        }
+        out
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Append {
     pub key: Bytes,
     pub value: Bytes,
@@ -174,9 +187,18 @@ impl Append {
 
         Ok(())
     }
+
+    pub fn rewrite(&self) -> BytesMut {
+        let mut out = BytesMut::new();
+        shared::extend_array(&mut out, 3);
+        shared::extend_bulk_string(&mut out, b"APPEND" as &[u8]);
+        shared::extend_bulk_string(&mut out, &self.key[..]);
+        shared::extend_bulk_string(&mut out, &self.value[..]);
+        out
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Strlen {
     pub key: Bytes,
 }

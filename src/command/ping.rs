@@ -6,7 +6,7 @@ use crate::shared;
 use bytes::Bytes;
 use std::io::Result;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Ping {
     /// optional message to be returned
     msg: Option<Bytes>,
@@ -19,7 +19,7 @@ impl Ping {
         Ok(Self { msg })
     }
 
-    pub(crate) async fn apply(self, _db: &Database, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, _db: &Database, dst: &mut Connection) -> Result<()> {
         let response = match self.msg {
             None => shared::pong,
             Some(msg) => Frame::Bulk(msg),
@@ -32,7 +32,7 @@ impl Ping {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Quit {}
 
 impl Quit {
