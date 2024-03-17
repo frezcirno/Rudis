@@ -1,6 +1,6 @@
 use super::CommandParser;
 use crate::connection::Connection;
-use crate::db::Database;
+use crate::dbms::DatabaseRef;
 use crate::frame::Frame;
 use crate::shared;
 use bytes::Bytes;
@@ -19,7 +19,7 @@ impl Ping {
         Ok(Self { msg })
     }
 
-    pub async fn apply(self, _db: &Database, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, _db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         let response = match self.msg {
             None => shared::pong,
             Some(msg) => Frame::Bulk(msg),
@@ -36,7 +36,7 @@ impl Ping {
 pub struct Quit {}
 
 impl Quit {
-    pub fn from(frame: &mut CommandParser) -> Result<Self> {
+    pub fn from(_frame: &mut CommandParser) -> Result<Self> {
         Ok(Self {})
     }
 }

@@ -1,3 +1,11 @@
 bindaddr = "127.0.0.1"
 port = 6379
 rdb_filename = "dump.rdb"
+aof_filename = "appendonly.aof"
+db_num = 16
+hz = 10
+logfile = "redis.log"
+verbosity = "debug"
+save = ["3600 1", "300 10", "60 10000"]
+appendonly = "yes"
+appendfsync = "everysec"

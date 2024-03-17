@@ -1,5 +1,5 @@
 use super::CommandParser;
-use crate::db::Database;
+use crate::dbms::DatabaseRef;
 use crate::object::RudisObject;
 use crate::shared;
 use crate::{connection::Connection, frame::Frame};
@@ -24,8 +24,8 @@ impl SAdd {
         Ok(Self { key, members })
     }
 
-    pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
-        let mut db = db.lock().await;
+    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+        let mut db = db.write().await;
 
         match db.lookup_write(&self.key.clone()) {
             Some(RudisObject::Set(s)) => {
@@ -91,8 +91,8 @@ impl SRem {
         Ok(Self { key, members })
     }
 
-    pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
-        let mut db = db.lock().await;
+    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+        let mut db = db.write().await;
 
         match db.lookup_write(&self.key.clone()) {
             Some(RudisObject::Set(s)) => {

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::db::Databases;
+use crate::dbms::DatabaseManager;
 use crate::object::RudisObject;
 use crate::server::Server;
 use crate::shared;
@@ -32,6 +32,7 @@ const REDIS_RDB_OPCODE_SELECTDB: u8 = 254;
 // 数据库的结尾（但不是 RDB 文件的结尾）
 const REDIS_RDB_OPCODE_EOF: u8 = 255;
 
+#[derive(Clone, Debug)]
 pub struct AutoSave {
     pub seconds: u64,
     pub changes: u64,
@@ -210,7 +211,7 @@ impl DerefMut for Rdb {
     }
 }
 
-impl Databases {
+impl DatabaseManager {
     pub async fn save(&self, rdb: &mut Rdb) -> Result<()> {
         let now = shared::now_ms();
 
@@ -218,18 +219,19 @@ impl Databases {
         let magic = b"REDIS0006";
         rdb.write_all(magic).await?;
 
-        for db in self.iter() {
-            // write SELECTDB index
-            rdb.write_u8(REDIS_RDB_OPCODE_SELECTDB).await?;
-            rdb.write_u32(db.index).await?;
+        // for db in self.iter() {
+        let db = self.get(0);
+        // write SELECTDB index
+        rdb.write_u8(REDIS_RDB_OPCODE_SELECTDB).await?;
+        rdb.write_u32(db.index).await?;
 
-            let db = db.lock().await;
-            for (key, value) in db.dict.iter() {
-                let expire = db.expires.get(key);
-                rdb.save_key_value_pair(key, value, expire.copied(), now)
-                    .await?;
-            }
+        let db = db.read().await;
+        for (key, value) in db.dict.iter() {
+            let expire = db.expires.get(key);
+            rdb.save_key_value_pair(key, value, expire.copied(), now)
+                .await?;
         }
+        // }
 
         // write EOF
         rdb.write_u8(REDIS_RDB_OPCODE_EOF).await?;
@@ -250,7 +252,7 @@ impl Databases {
 
         let magic = b"REDIS0006";
         if &buf[0..9] != magic {
-            panic!("Invalid RDB file magic");
+            return Err(Error::new(ErrorKind::InvalidData, "Invalid RDB file magic"));
         }
 
         let mut db = None;
@@ -265,7 +267,7 @@ impl Databases {
                 }
                 REDIS_RDB_OPCODE_SELECTDB => {
                     let db_index = rdb.read_u32().await? as usize;
-                    if db_index >= self.len() {
+                    if db_index >= 1 {
                         return Err(Error::new(ErrorKind::InvalidData, "Invalid DB index"));
                     }
                     db = Some(self.get(db_index));
@@ -294,7 +296,7 @@ impl Databases {
             }
 
             if let Some(db) = &mut db {
-                db.lock().await.insert(key, value, expire_ms);
+                db.write().await.insert(key, value, expire_ms);
             } else {
                 return Err(Error::new(ErrorKind::InvalidData, "No SELECTDB"));
             }
@@ -305,7 +307,7 @@ impl Databases {
 }
 
 impl Server {
-    pub async fn background_save_done(self: &Arc<Self>, dbs: &mut Databases) {
+    pub async fn background_save_done(self: &Arc<Self>, dbs: &mut DatabaseManager) {
         log::info!("Background save done");
 
         dbs.rdb_save_task = None;

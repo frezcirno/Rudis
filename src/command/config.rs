@@ -1,7 +1,5 @@
 use super::CommandParser;
-use crate::db::Database;
-use crate::object::RudisObject;
-use crate::{connection::Connection, frame::Frame};
+
 use bytes::Bytes;
 use std::io::{Error, ErrorKind, Result};
 
@@ -41,7 +39,7 @@ impl ConfigGet {
 pub struct ConfigResetStat {}
 
 impl ConfigResetStat {
-    pub fn from(frame: &mut CommandParser) -> Result<ConfigResetStat> {
+    pub fn from(_frame: &mut CommandParser) -> Result<ConfigResetStat> {
         Ok(ConfigResetStat {})
     }
 }
@@ -50,7 +48,7 @@ impl ConfigResetStat {
 pub struct ConfigRewrite {}
 
 impl ConfigRewrite {
-    pub fn from(frame: &mut CommandParser) -> Result<ConfigRewrite> {
+    pub fn from(_frame: &mut CommandParser) -> Result<ConfigRewrite> {
         Ok(ConfigRewrite {})
     }
 }

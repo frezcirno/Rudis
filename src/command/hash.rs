@@ -1,5 +1,5 @@
 use super::CommandParser;
-use crate::db::Database;
+use crate::dbms::DatabaseRef;
 use crate::object::RudisObject;
 use crate::shared;
 use crate::{connection::Connection, frame::Frame};
@@ -27,8 +27,8 @@ impl HSet {
         Ok(Self { key, field, value })
     }
 
-    pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
-        let mut db = db.lock().await;
+    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+        let mut db = db.write().await;
 
         match db.lookup_write(&self.key.clone()) {
             Some(RudisObject::Hash(h)) => {
@@ -81,8 +81,8 @@ impl HGet {
         Ok(Self { key, field })
     }
 
-    pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
-        let mut db = db.lock().await;
+    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+        let mut db = db.write().await;
 
         match db.lookup_read(&self.key) {
             Some(RudisObject::Hash(h)) => {

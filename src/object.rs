@@ -3,6 +3,7 @@ use bytes::{Bytes, BytesMut};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 
+#[derive(Debug, Clone)]
 pub struct RudisString {
     pub value: BytesMut,
 }
@@ -21,6 +22,7 @@ impl Deref for RudisString {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct RudisList {
     value: VecDeque<BytesMut>,
 }
@@ -47,6 +49,7 @@ impl DerefMut for RudisList {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct RudisSet {
     value: HashSet<Bytes>,
 }
@@ -73,6 +76,7 @@ impl DerefMut for RudisSet {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct RudisHash {
     value: HashMap<Bytes, BytesMut>,
 }
@@ -99,6 +103,7 @@ impl DerefMut for RudisHash {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct RudisZSet {
     value: BTreeMap<Bytes, f64>,
 }
@@ -125,6 +130,7 @@ impl DerefMut for RudisZSet {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum RudisObject {
     String(RudisString),
     List(RudisList),
@@ -248,7 +254,7 @@ impl RudisObject {
 
     pub fn serialize(&self) -> Frame {
         match self {
-            RudisObject::String(value) => Frame::Bulk((*value).clone().freeze()),
+            RudisObject::String(value) => Frame::Bulk(<BytesMut as Clone>::clone(&value).freeze()),
             _ => Frame::Error("not implemented".into()),
         }
     }

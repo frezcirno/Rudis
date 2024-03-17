@@ -1,8 +1,8 @@
 use crate::aof::AofState;
 use crate::command::Command;
-use crate::config::Config;
+use crate::config::ConfigRef;
 use crate::connection::Connection;
-use crate::db::{Database, Databases};
+use crate::dbms::{DatabaseManager, DatabaseRef};
 use crate::shared;
 use std::io::Result;
 use std::net::SocketAddr;
@@ -21,9 +21,9 @@ pub struct ClientInner {
 }
 
 pub struct Client {
-    pub config: Arc<RwLock<Config>>,
-    pub dbs: Databases,
-    pub db: Database,
+    pub config: ConfigRef,
+    pub dbms: DatabaseManager,
+    pub db: DatabaseRef,
     pub connection: Connection,
     pub address: SocketAddr,
     pub inner: RwLock<ClientInner>,
@@ -46,13 +46,13 @@ impl Client {
     }
 
     pub fn select(&mut self, index: usize) -> Result<()> {
-        if index >= self.dbs.len() {
+        if index >= 1 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "invalid db index",
             ));
         }
-        self.db = self.dbs[index].clone();
+        self.db = self.dbms.get(0);
         Ok(())
     }
 
@@ -113,8 +113,8 @@ impl Client {
     }
 
     async fn propagate(&mut self, cmd: Command) {
-        if self.dbs.aof_state != AofState::On {
-            self.dbs.feed_append_only_file(cmd, self.db.index).await;
+        if self.config.read().await.aof_state != AofState::On {
+            self.dbms.feed_append_only_file(cmd, self.db.index).await;
         }
     }
 }

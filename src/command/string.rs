@@ -1,5 +1,5 @@
 use super::CommandParser;
-use crate::db::Database;
+use crate::dbms::DatabaseRef;
 use crate::object::RudisObject;
 use crate::shared;
 use crate::{connection::Connection, frame::Frame};
@@ -19,10 +19,10 @@ impl Get {
         Ok(Self { key })
     }
 
-    pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         // Get the value from the shared database state
         let response = {
-            let mut lock = db.lock().await;
+            let mut lock = db.write().await;
             if let Some(value) = lock.lookup_read(&self.key) {
                 // If a value is present, it is written to the client in "bulk"
                 // format.
@@ -104,9 +104,9 @@ impl Set {
         })
     }
 
-    pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         // validate nx and xx
-        let mut db = db.lock().await;
+        let mut db = db.write().await;
 
         if self.flags & REDIS_SET_NX != 0 && db.contains_key(&self.key)
             || self.flags & REDIS_SET_XX != 0 && !db.contains_key(&self.key)
@@ -161,10 +161,10 @@ impl Append {
         Ok(Self { key, value })
     }
 
-    pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         // Append the value to the shared database state
         let response = {
-            let mut lock = db.lock().await;
+            let mut lock = db.write().await;
             if let Some(value) = lock.lookup_write(&self.key) {
                 if let RudisObject::String(s) = value {
                     s.value.extend_from_slice(&self.value);
@@ -211,10 +211,10 @@ impl Strlen {
         Ok(Self { key })
     }
 
-    pub async fn apply(self, db: &Database, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         // Get the value from the shared database state
         let response = {
-            let mut lock = db.lock().await;
+            let mut lock = db.write().await;
             if let Some(value) = lock.lookup_read(&self.key) {
                 if let RudisObject::String(s) = value {
                     Frame::Integer(s.len() as u64)

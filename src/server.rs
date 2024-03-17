@@ -1,7 +1,7 @@
 use crate::client::{Client, ClientInner};
-use crate::config::Config;
+use crate::config::ConfigRef;
 use crate::connection::Connection;
-use crate::db::Databases;
+use crate::dbms::DatabaseManager;
 use crate::rdb::Rdb;
 use crate::shared;
 use log;
@@ -20,21 +20,19 @@ pub struct RudisServerInner {
 }
 
 pub struct Server {
-    pub config: Arc<RwLock<Config>>,
-    pub dbs: Databases,
+    pub config: ConfigRef,
+    pub dbms: DatabaseManager,
     pub inner: RwLock<RudisServerInner>,
     pub quit_ch: broadcast::Sender<()>,
 }
 
 impl Server {
-    pub async fn from_config(config: Config) -> Arc<Server> {
-        let config = Arc::new(RwLock::new(config));
-
-        let mut dbs = Databases::new(config.clone()).await;
-        dbs.load_data_from_disk().await;
+    pub async fn from_config(config: ConfigRef) -> Arc<Server> {
+        let mut dbms = DatabaseManager::new(config.clone()).await;
+        dbms.load_data_from_disk().await;
 
         let server = Server {
-            dbs,
+            dbms,
             config,
             inner: RwLock::new(RudisServerInner {
                 runid: shared::gen_runid(),
@@ -48,14 +46,14 @@ impl Server {
     pub async fn start(self: &Arc<Self>) -> Result<()> {
         {
             let self_clone = self.clone();
-            let mut dbs_clone = self.dbs.clone();
-            let mut quit_ch = self.quit_ch.subscribe();
+            let mut dbms = self.dbms.clone();
+            let _quit_ch = self.quit_ch.subscribe();
             tokio::spawn(async move {
                 let mut cronloops = 0;
                 let mut period_ms = 1000 / self_clone.config.read().await.hz as u64;
                 loop {
                     sleep(Duration::from_millis(period_ms)).await;
-                    match self_clone.server_cron(&mut dbs_clone, cronloops).await {
+                    match self_clone.server_cron(&mut dbms, cronloops).await {
                         Some(next_ms) => period_ms = next_ms,
                         None => break,
                     }
@@ -66,10 +64,10 @@ impl Server {
 
         {
             let self_clone = self.clone();
-            let mut dbs_clone = self.dbs.clone();
+            let mut dbms = self.dbms.clone();
             tokio::spawn(async move {
                 loop {
-                    self_clone.before_sleep(&mut dbs_clone).await;
+                    self_clone.before_sleep(&mut dbms).await;
                     sleep(Duration::from_millis(100)).await;
                 }
             });
@@ -92,8 +90,8 @@ impl Server {
                     log::info!("Accepted connection from {}", address);
                     let mut c = Client {
                         config: self.config.clone(),
-                        dbs: self.dbs.clone(),
-                        db: self.dbs[0].clone(),
+                        dbms: self.dbms.clone(),
+                        db: self.dbms.get(0),
                         connection: Connection::from(connection),
                         address,
                         inner: RwLock::new(ClientInner {
@@ -121,8 +119,7 @@ impl Server {
         }
     }
 
-    async fn before_sleep(self: &Arc<Self>, dbs: &mut Databases) {
-        
+    async fn before_sleep(self: &Arc<Self>, dbs: &mut DatabaseManager) {
         dbs.flush_append_only_file().await;
     }
 
@@ -131,11 +128,15 @@ impl Server {
         // inner.dirty = 0;
     }
 
-    async fn server_cron(self: &Arc<Self>, dbs: &mut Databases, cronloops: u64) -> Option<u64> {
+    async fn server_cron(
+        self: &Arc<Self>,
+        dbms: &mut DatabaseManager,
+        cronloops: u64,
+    ) -> Option<u64> {
         let period_ms = 1000 / self.config.read().await.hz as u64;
 
         // update clock
-        dbs.clock_ms = shared::now_ms();
+        dbms.clock_ms = shared::now_ms();
 
         // 100 ms: track operations per second
         if 100 <= period_ms || cronloops % (100 / period_ms) == 0 {
@@ -144,55 +145,56 @@ impl Server {
 
         // 500 ms: print stats info
         if 500 <= period_ms || cronloops % (500 / period_ms) == 0 {
-            for db in self.dbs.iter() {
-                let index = db.index;
-                let db = db.lock().await;
-                let size = db.dict.capacity();
-                let used = db.dict.len();
-                let vkeys = db.expires.len();
-                drop(db);
-                if used > 0 || vkeys > 0 {
-                    log::info!(
-                        "DB {}: {} keys ({} volatile) in {} slots",
-                        index,
-                        used,
-                        vkeys,
-                        size
-                    );
-                }
+            // for db in self.dbs.iter() {
+            let db = self.dbms.get(0);
+            let index = db.index;
+            let db = db.read().await;
+            let size = db.dict.capacity();
+            let used = db.dict.len();
+            let vkeys = db.expires.len();
+            drop(db);
+            if used > 0 || vkeys > 0 {
+                log::info!(
+                    "DB {}: {} keys ({} volatile) in {} slots",
+                    index,
+                    used,
+                    vkeys,
+                    size
+                );
             }
+            // }
         }
 
         self.clients_cron(cronloops).await;
 
         self.databases_cron(cronloops).await;
 
-        if dbs.rdb_save_task.is_none() && dbs.aof_rewrite_task.is_none() {
-            if dbs.aof_rewrite_scheduled {
-                dbs.rewrite_append_only_file_background().await;
+        if dbms.rdb_save_task.is_none() && dbms.aof_rewrite_task.is_none() {
+            if dbms.aof_rewrite_scheduled {
+                dbms.rewrite_append_only_file_background().await;
             }
         }
 
-        if let Some(rdb_save_task) = &dbs.rdb_save_task {
+        if let Some(rdb_save_task) = &dbms.rdb_save_task {
             // clean up finished background save
             if rdb_save_task.is_finished() {
-                self.background_save_done(dbs).await;
+                self.background_save_done(dbms).await;
             }
-        } else if let Some(aof_rewrite_task) = &dbs.aof_rewrite_task {
+        } else if let Some(aof_rewrite_task) = &dbms.aof_rewrite_task {
             // clean up finished background rewrite
             if aof_rewrite_task.is_finished() {
-                self.background_rewrite_done_handler(dbs).await;
+                self.background_rewrite_done_handler(dbms).await;
             }
         } else {
             // check if we need to start a background save
-            if dbs.should_save() {
+            if dbms.should_save().await {
                 let file = File::create(&self.config.read().await.rdb_filename)
                     .await
                     .unwrap();
                 let mut rdb = Rdb::from_file(file);
-                let dbs_clone = dbs.clone();
-                dbs.rdb_save_task = Some(tokio::spawn(async move {
-                    dbs_clone.save(&mut rdb).await.unwrap();
+                let dbms_clone = dbms.clone();
+                dbms.rdb_save_task = Some(tokio::spawn(async move {
+                    dbms_clone.save(&mut rdb).await.unwrap();
                 }));
             }
 
@@ -202,15 +204,15 @@ impl Server {
 
         // 1000 ms: flush append only file
         if 1000 <= period_ms || cronloops % (1000 / period_ms) == 0 {
-            dbs.flush_append_only_file().await;
+            dbms.flush_append_only_file().await;
         }
 
         Some(period_ms)
     }
 
-    async fn clients_cron(self: &Arc<Self>, cronloops: u64) {}
+    async fn clients_cron(self: &Arc<Self>, _cronloops: u64) {}
 
-    async fn databases_cron(self: &Arc<Self>, cronloops: u64) {}
+    async fn databases_cron(self: &Arc<Self>, _cronloops: u64) {}
 
     fn would_block(err: &Error) -> bool {
         err.kind() == ErrorKind::WouldBlock

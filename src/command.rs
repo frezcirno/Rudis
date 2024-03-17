@@ -8,12 +8,11 @@ mod rdb;
 mod set;
 mod string;
 mod unknown;
-use crate::aof::AofState;
+use crate::aof::{AofFsync, AofState};
 use crate::client::Client;
-use crate::connection::Connection;
-use crate::db::Database;
+use crate::config::Verbosity;
 use crate::frame::Frame;
-use crate::rdb::Rdb;
+use crate::rdb::{AutoSave, Rdb};
 use crate::shared;
 use aof::BgRewriteAof;
 use bytes::Bytes;
@@ -224,14 +223,15 @@ impl Client {
                 }
             }
             Command::DbSize(_) => {
-                let len = self.dbs.len();
+                // let len = self.dbs.len();
+                let len = 1; // only one database for now
                 self.connection
                     .write_frame(&Frame::Integer(len as u64))
                     .await?;
                 // continue;
             }
             Command::Save(_) => {
-                if self.dbs.rdb_save_task.is_some() {
+                if self.dbms.rdb_save_task.is_some() {
                     self.connection
                         .write_frame(&Frame::Error(Bytes::from_static(
                             b"ERR background save is running",
@@ -243,11 +243,11 @@ impl Client {
                 let config = self.config.clone();
                 let file = File::create(&config.read().await.rdb_filename).await?;
                 let mut rdb = Rdb::from_file(file);
-                self.dbs.save(&mut rdb).await?;
+                self.dbms.save(&mut rdb).await?;
                 self.connection.write_frame(&shared::ok).await?;
             }
             Command::BgSave(_) => {
-                if self.dbs.rdb_save_task.is_some() {
+                if self.dbms.rdb_save_task.is_some() {
                     self.connection
                         .write_frame(&Frame::Error(Bytes::from_static(
                             b"ERR background save is running",
@@ -258,25 +258,30 @@ impl Client {
                 let config = self.config.clone();
                 let file = File::create(&config.read().await.rdb_filename).await?;
                 let mut rdb = Rdb::from_file(file);
-                let dbs = self.dbs.clone();
-                self.dbs.rdb_save_task = Some(tokio::spawn(async move {
-                    dbs.save(&mut rdb).await.unwrap();
+                let dbms = self.dbms.clone();
+                self.dbms.rdb_save_task = Some(tokio::spawn(async move {
+                    dbms.save(&mut rdb).await.unwrap();
                 }));
                 self.connection.write_frame(&shared::ok).await?;
             }
             Command::BgRewriteAof(_) => {
-                if self.dbs.aof_rewrite_task.is_some() {
+                if self.dbms.aof_rewrite_task.is_some() {
                     self.connection
                         .write_frame(&Frame::Error(Bytes::from_static(
                             b"ERR background rewrite is running",
                         )))
                         .await?;
-                } else if self.dbs.rdb_save_task.is_some() {
-                    self.dbs.aof_rewrite_scheduled = true;
+                } else if self.dbms.rdb_save_task.is_some() {
+                    self.dbms.aof_rewrite_scheduled = true;
                     self.connection
                         .write_frame(&Frame::Simple(Bytes::from_static(b"BgAofRewrite schduled")))
                         .await?;
-                } else if self.dbs.rewrite_append_only_file_background().await.is_err() {
+                } else if self
+                    .dbms
+                    .rewrite_append_only_file_background()
+                    .await
+                    .is_err()
+                {
                     self.connection
                         .write_frame(&Frame::Error(Bytes::from_static(
                             b"ERR background rewrite error",
@@ -358,7 +363,9 @@ impl Client {
                         self.connection
                             .write_frame(&Frame::Array(vec![
                                 Frame::Bulk(cmd.key),
-                                Frame::new_bulk_from(self.dbs.aof_state.to_string()),
+                                Frame::new_bulk_from(
+                                    self.config.read().await.aof_state.to_string(),
+                                ),
                             ]))
                             .await?;
                     }
@@ -376,13 +383,17 @@ impl Client {
                         self.connection
                             .write_frame(&Frame::Array(vec![
                                 Frame::Bulk(cmd.key),
-                                Frame::new_bulk_from(self.dbs.aof_fsync.to_string()),
+                                Frame::new_bulk_from(
+                                    self.config.read().await.aof_fsync.to_string(),
+                                ),
                             ]))
                             .await?;
                     }
                     b"save" => {
                         let save_params = self
-                            .dbs
+                            .config
+                            .read()
+                            .await
                             .save_params
                             .iter()
                             .map(|save| save.to_string())
@@ -422,11 +433,20 @@ impl Client {
                 }
             }
             Command::ConfigSet(cmd) => match &cmd.key[..] {
-                b"dbfilename" => {
-                    self.config.write().await.rdb_filename = String::from_utf8(cmd.value.to_vec())
-                        .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid dbfilename"))?;
-                    self.connection.write_frame(&shared::ok).await?;
-                }
+                b"dbfilename" => match String::from_utf8(cmd.value.to_vec()) {
+                    Ok(newval) => {
+                        self.config.write().await.rdb_filename = newval;
+                        self.connection.write_frame(&shared::ok).await?;
+                    }
+                    Err(_) => {
+                        self.connection
+                            .write_frame(&Frame::Error(Bytes::from_static(
+                                b"ERR invalid dbfilename",
+                            )))
+                            .await?;
+                        return Ok(());
+                    }
+                },
                 b"port" => {
                     if let Ok(port) = std::str::from_utf8(&cmd.value).unwrap().parse::<u16>() {
                         self.config.write().await.port = port;
@@ -456,6 +476,82 @@ impl Client {
                             .write_frame(&Frame::Error(Bytes::from_static(b"ERR invalid hz")))
                             .await?;
                     }
+                }
+                b"appendonly" => {
+                    let aof_state = match std::str::from_utf8(&cmd.value).unwrap() {
+                        "on" => AofState::On,
+                        "off" => AofState::Off,
+                        _ => {
+                            self.connection
+                                .write_frame(&Frame::Error(Bytes::from_static(
+                                    b"ERR invalid appendonly",
+                                )))
+                                .await?;
+                            return Ok(());
+                        }
+                    };
+                    self.config.write().await.aof_state = aof_state;
+                    self.connection.write_frame(&shared::ok).await?;
+                }
+                b"appendfsync" => {
+                    let aof_fsync = match std::str::from_utf8(&cmd.value).unwrap() {
+                        "everysec" => AofFsync::Everysec,
+                        "always" => AofFsync::Always,
+                        "no" => AofFsync::No,
+                        _ => {
+                            self.connection
+                                .write_frame(&Frame::Error(Bytes::from_static(
+                                    b"ERR invalid appendfsync",
+                                )))
+                                .await?;
+                            return Ok(());
+                        }
+                    };
+                    self.config.write().await.aof_fsync = aof_fsync;
+                    self.connection.write_frame(&shared::ok).await?;
+                }
+                b"save" => {
+                    let save_params = std::str::from_utf8(&cmd.value).unwrap();
+                    let save_params = save_params
+                        .split_whitespace()
+                        .map(|param| {
+                            let mut iter = param.split_whitespace();
+                            let seconds = iter.next().unwrap().parse().unwrap();
+                            let changes = iter.next().unwrap().parse().unwrap();
+                            AutoSave { seconds, changes }
+                        })
+                        .collect();
+                    self.config.write().await.save_params = save_params;
+                    self.connection.write_frame(&shared::ok).await?;
+                }
+                b"dir" => {
+                    // chdir
+                    let dir = std::str::from_utf8(&cmd.value).unwrap();
+                    if let Ok(_) = std::env::set_current_dir(dir) {
+                        self.connection.write_frame(&shared::ok).await?;
+                    } else {
+                        self.connection
+                            .write_frame(&Frame::Error(Bytes::from_static(b"ERR invalid dir")))
+                            .await?;
+                    }
+                }
+                b"loglevel" => {
+                    let verbosity = match std::str::from_utf8(&cmd.value).unwrap() {
+                        "quiet" => Verbosity::Quiet,
+                        "normal" => Verbosity::Normal,
+                        "verbose" => Verbosity::Verbose,
+                        "debug" => Verbosity::Debug,
+                        _ => {
+                            self.connection
+                                .write_frame(&Frame::Error(Bytes::from_static(
+                                    b"ERR invalid loglevel",
+                                )))
+                                .await?;
+                            return Ok(());
+                        }
+                    };
+                    self.config.write().await.verbosity = verbosity;
+                    self.connection.write_frame(&shared::ok).await?;
                 }
                 _ => {
                     self.connection

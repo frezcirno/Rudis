@@ -1,5 +1,5 @@
 use libc::srand;
-use rudis::config::Config;
+use rudis::config::{Config, ConfigRef};
 use rudis::server::Server;
 use std::time;
 use tokio;
@@ -35,7 +35,7 @@ async fn amain() {
     let cwd = std::env::current_dir().unwrap();
     log::info!("cwd: {:?}", cwd);
 
-    let config = Config::from_toml("./rudis.toml");
+    let config = ConfigRef::new(Config::from_toml("./rudis.toml"));
     let server = Server::from_config(config).await;
     let _ = server.start().await;
 }

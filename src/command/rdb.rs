@@ -1,16 +1,12 @@
 use super::CommandParser;
-use crate::db::Database;
-use crate::object::RudisObject;
-use crate::shared;
-use crate::{connection::Connection, frame::Frame};
-use bytes::{Bytes, BytesMut};
-use std::io::{Error, ErrorKind, Result};
+
+use std::io::Result;
 
 #[derive(Debug, Clone)]
 pub struct Save {}
 
 impl Save {
-    pub fn from(frame: &mut CommandParser) -> Result<Self> {
+    pub fn from(_frame: &mut CommandParser) -> Result<Self> {
         Ok(Self {})
     }
 }
@@ -19,7 +15,7 @@ impl Save {
 pub struct BgSave {}
 
 impl BgSave {
-    pub fn from(frame: &mut CommandParser) -> Result<Self> {
+    pub fn from(_frame: &mut CommandParser) -> Result<Self> {
         Ok(Self {})
     }
 }

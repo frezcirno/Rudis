@@ -1,9 +1,9 @@
 use crate::command::Command;
-use crate::db::Databases;
+use crate::dbms::DatabaseManager;
 use crate::object::{RudisHash, RudisList, RudisObject, RudisSet, RudisString, RudisZSet};
 use crate::server::Server;
 use crate::shared;
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use std::fmt::Display;
 use std::io::Result;
 use std::ops::{Deref, DerefMut};
@@ -11,11 +11,21 @@ use std::sync::Arc;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub enum AofState {
     On,
     Off,
     WaitRewrite,
+}
+
+impl AofState {
+    pub fn from(b: bool) -> Self {
+        if b {
+            AofState::On
+        } else {
+            AofState::Off
+        }
+    }
 }
 
 impl Display for AofState {
@@ -34,7 +44,7 @@ impl Default for AofState {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub enum AofFsync {
     Always,
     Everysec,
@@ -136,7 +146,7 @@ impl DerefMut for AofWriter {
     }
 }
 
-impl Databases {
+impl DatabaseManager {
     async fn rewrite_append_only_file(&mut self, filename: &str) -> Result<()> {
         let now = shared::now_ms();
 
@@ -146,36 +156,37 @@ impl Databases {
 
         let mut aof = AofWriter::default();
 
-        for db in self.iter() {
-            // "SELECT index"
-            aof.extend_array(2);
-            aof.extend_bulk_string(b"SELECT" as &[u8]);
-            aof.extend_bulk_string(db.index.to_string().as_bytes());
+        // for db in self.snapshot().iter() {
+        let db = self.get(0);
+        // "SELECT index"
+        aof.extend_array(2);
+        aof.extend_bulk_string(b"SELECT" as &[u8]);
+        aof.extend_bulk_string(db.index.to_string().as_bytes());
 
-            let db = db.lock().await;
-            for (key, value) in db.dict.iter() {
-                let expire = db.expires.get(key);
-                if expire.is_some_and(|e| *e < now) {
-                    continue;
-                }
+        let db = db.read().await;
+        for (key, value) in db.dict.iter() {
+            let expire = db.expires.get(key);
+            if expire.is_some_and(|e| *e < now) {
+                continue;
+            }
 
-                match value {
-                    RudisObject::String(s) => aof.rewrite_string(&key, s),
-                    RudisObject::List(l) => aof.rewrite_list(&key, l),
-                    RudisObject::Set(s) => aof.rewrite_set(&key, s),
-                    RudisObject::Hash(h) => aof.rewrite_hash(&key, h),
-                    RudisObject::ZSet(z) => aof.rewrite_zset(&key, z),
-                }
+            match value {
+                RudisObject::String(s) => aof.rewrite_string(&key, &s),
+                RudisObject::List(l) => aof.rewrite_list(&key, &l),
+                RudisObject::Set(s) => aof.rewrite_set(&key, &s),
+                RudisObject::Hash(h) => aof.rewrite_hash(&key, &h),
+                RudisObject::ZSet(z) => aof.rewrite_zset(&key, &z),
+            }
 
-                if let Some(expire) = expire {
-                    // "PEXPIREAT key timestamp"
-                    aof.extend_array(3);
-                    aof.extend_bulk_string(b"PEXPIREAT" as &[u8]);
-                    aof.extend_bulk_string(&key[..]);
-                    aof.extend_bulk_string(expire.to_string().as_bytes());
-                }
+            if let Some(expire) = expire {
+                // "PEXPIREAT key timestamp"
+                aof.extend_array(3);
+                aof.extend_bulk_string(b"PEXPIREAT" as &[u8]);
+                aof.extend_bulk_string(&key[..]);
+                aof.extend_bulk_string(expire.to_string().as_bytes());
             }
         }
+        // }
 
         file.write_all(&aof).await?;
         file.flush().await?;
@@ -198,12 +209,11 @@ impl Databases {
     }
 
     pub async fn rewrite_append_only_file_background(&mut self) -> Result<()> {
-        let aof_bg_filename = format!("temp-rewriteaof-bg-{}.aof", shared::get_pid());
-
-        let mut dbs = self.clone();
+        let mut dbms = self.clone();
         self.aof_rewrite_task = Some(tokio::spawn(async move {
             // do the job
-            dbs.rewrite_append_only_file(&aof_bg_filename).await;
+            let aof_bg_filename = format!("temp-rewriteaof-bg-{}.aof", shared::get_pid());
+            dbms.rewrite_append_only_file(&aof_bg_filename).await;
         }));
 
         Ok(())
@@ -212,27 +222,27 @@ impl Databases {
     pub async fn feed_append_only_file(&mut self, cmd: Command, db_index: u32) -> Result<()> {
         let mut buf = BytesMut::new();
 
-        if self.aof_selected_db != db_index {
+        if self.aof_selected_db != Some(db_index) {
             // emit "SELECT index"
             shared::extend_array(&mut buf, 2);
             shared::extend_bulk_string(&mut buf, b"SELECT" as &[u8]);
             shared::extend_bulk_string(&mut buf, db_index.to_string().as_bytes());
-            self.aof_selected_db = db_index;
+            self.aof_selected_db = Some(db_index);
         }
 
         match cmd {
-            Command::Ping(cmd) => {}
-            Command::Quit(cmd) => {}
-            Command::Get(cmd) => {}
+            Command::Ping(_cmd) => {}
+            Command::Quit(_cmd) => {}
+            Command::Get(_cmd) => {}
             Command::Set(cmd) => buf.extend_from_slice(&cmd.rewrite()),
             Command::Append(cmd) => buf.extend_from_slice(&cmd.rewrite()),
-            Command::Strlen(cmd) => {}
+            Command::Strlen(_cmd) => {}
             Command::Del(cmd) => buf.extend_from_slice(&cmd.rewrite()),
-            Command::Exists(cmd) => {}
-            Command::Select(cmd) => {}
-            Command::Keys(cmd) => {}
-            Command::DbSize(cmd) => {}
-            Command::Shutdown(cmd) => {}
+            Command::Exists(_cmd) => {}
+            Command::Select(_cmd) => {}
+            Command::Keys(_cmd) => {}
+            Command::DbSize(_cmd) => {}
+            Command::Shutdown(_cmd) => {}
             Command::Rename(cmd) => buf.extend_from_slice(&cmd.rewrite()),
             Command::Expire(cmd) => buf.extend_from_slice(&cmd.rewrite()),
             Command::ExpireAt(cmd) => buf.extend_from_slice(&cmd.rewrite()),
@@ -243,20 +253,20 @@ impl Databases {
             Command::LPop(cmd) => buf.extend_from_slice(&cmd.rewrite()),
             Command::RPop(cmd) => buf.extend_from_slice(&cmd.rewrite()),
             Command::HSet(cmd) => buf.extend_from_slice(&cmd.rewrite()),
-            Command::HGet(cmd) => {}
+            Command::HGet(_cmd) => {}
             Command::SAdd(cmd) => buf.extend_from_slice(&cmd.rewrite()),
             Command::SRem(cmd) => buf.extend_from_slice(&cmd.rewrite()),
-            Command::Save(cmd) => {}
-            Command::BgSave(cmd) => {}
-            Command::BgRewriteAof(cmd) => {}
-            Command::ConfigGet(cmd) => {}
-            Command::ConfigSet(cmd) => {}
-            Command::ConfigResetStat(cmd) => {}
-            Command::ConfigRewrite(cmd) => {}
-            Command::Unknown(cmd) => {}
+            Command::Save(_cmd) => {}
+            Command::BgSave(_cmd) => {}
+            Command::BgRewriteAof(_cmd) => {}
+            Command::ConfigGet(_cmd) => {}
+            Command::ConfigSet(_cmd) => {}
+            Command::ConfigResetStat(_cmd) => {}
+            Command::ConfigRewrite(_cmd) => {}
+            Command::Unknown(_cmd) => {}
         }
 
-        if self.aof_state == AofState::On {
+        if self.config.read().await.aof_state == AofState::On {
             self.aof_buf.extend_from_slice(&buf);
         }
 
@@ -287,14 +297,15 @@ impl Databases {
         Ok(())
     }
 
-    pub async fn flush_append_only_file(&mut self) {
+    /// Flush the AOF buffer to disk
+    pub async fn flush_append_only_file(&mut self) -> Result<()> {
         if self.aof_buf.is_empty() {
-            return;
+            return Ok(());
         }
         let aof_file = self.aof_file.as_mut().unwrap();
 
-        if self.aof_fsync == AofFsync::Everysec {
-            if self.aof_state == AofState::On {
+        if self.config.read().await.aof_fsync == AofFsync::Everysec {
+            if self.config.read().await.aof_state == AofState::On {
                 // aof.flush().await.unwrap();
             }
         }
@@ -302,8 +313,6 @@ impl Databases {
         // write!
         match aof_file.write(&self.aof_buf).await {
             Ok(n_written) => {
-                self.aof_buf.advance(n_written);
-
                 self.aof_current_size += n_written as u64;
                 self.aof_last_write_status = true;
             }
@@ -313,21 +322,54 @@ impl Databases {
             }
         }
 
-        if self.aof_fsync == AofFsync::Always {
-            aof_file.sync_data().await;
-            self.aof_last_fsync = self.clock_ms;
-        } else if self.aof_fsync == AofFsync::Everysec && self.aof_last_fsync + 1000 < self.clock_ms
-        {
-            aof_file.sync_data().await;
-            self.aof_last_fsync = self.clock_ms;
+        match self.config.read().await.aof_fsync {
+            AofFsync::Always => {
+                aof_file.sync_data().await?;
+                self.aof_last_fsync = self.clock_ms;
+            }
+            AofFsync::Everysec => {
+                if self.aof_last_fsync + 1000 < self.clock_ms {
+                    aof_file.sync_data().await?;
+                    self.aof_last_fsync = self.clock_ms;
+                }
+            }
+            _ => {}
         }
+
+        Ok(())
+    }
+
+    /// Trigger by config set
+    pub async fn start_append_only(&mut self) -> Result<()> {
+        self.aof_last_fsync = shared::now_ms();
+
+        assert_eq!(self.aof_file.is_none(), true, "AOF already open");
+
+        self.aof_file = Some(
+            OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(&self.config.read().await.aof_filename)
+                .await?,
+        );
+
+        self.rewrite_append_only_file_background().await?;
+
+        self.config.write().await.aof_state = AofState::WaitRewrite;
+
+        Ok(())
+    }
+
+    /// Trigger by config set
+    pub fn stop_append_only(&mut self) {
+        self.aof_file = None;
     }
 }
 
 impl Server {
     pub async fn background_rewrite_done_handler(
         self: &Arc<Self>,
-        dbs: &mut Databases,
+        dbs: &mut DatabaseManager,
     ) -> Result<()> {
         log::info!("Background AOF rewrite terminated with success");
 
@@ -348,12 +390,30 @@ impl Server {
 
         tokio::fs::rename(&aof_bg_filename, &dbs.config.read().await.aof_filename).await?;
 
+        if dbs.aof_file.is_some() {
+            file.sync_data().await?;
+            dbs.aof_file = Some(file);
+            dbs.aof_selected_db = None;
+            dbs.aof_buf.clear();
+        }
+
+        log::info!("Background AOF rewrite finished successfully");
+
+        {
+            // rewrite is done
+            let mut cfg = self.config.write().await;
+            if cfg.aof_state == AofState::WaitRewrite {
+                cfg.aof_state = AofState::On;
+            }
+        }
+
         // cleanups
         dbs.aof_rewrite_buffer_reset();
 
         dbs.aof_rewrite_task = None;
 
-        if dbs.aof_state == AofState::WaitRewrite {
+        // schedule a new rewrite if needed
+        if dbs.config.read().await.aof_state == AofState::WaitRewrite {
             dbs.aof_rewrite_scheduled = true;
         }
 
