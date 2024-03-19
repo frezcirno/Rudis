@@ -225,10 +225,11 @@ impl DatabaseManager {
         rdb.write_u8(REDIS_RDB_OPCODE_SELECTDB).await?;
         rdb.write_u32(db.index).await?;
 
-        let db = db.read().await;
-        for (key, value) in db.dict.iter() {
-            let expire = db.expires.get(key);
-            rdb.save_key_value_pair(key, value, expire.copied(), now)
+        for it in db.iter() {
+            if it.is_expired() {
+                continue;
+            }
+            rdb.save_key_value_pair(it.key(), &it.value, it.expire_at, now)
                 .await?;
         }
         // }
@@ -296,7 +297,7 @@ impl DatabaseManager {
             }
 
             if let Some(db) = &mut db {
-                db.write().await.insert(key, value, expire_ms);
+                db.insert(key, value, expire_ms);
             } else {
                 return Err(Error::new(ErrorKind::InvalidData, "No SELECTDB"));
             }

@@ -1,10 +1,10 @@
 use super::CommandParser;
-use crate::dbms::DatabaseRef;
-use crate::object::RudisObject;
+use crate::dbms::{DatabaseRef, DictValue};
+use crate::object::{RudisList, RudisObject};
 use crate::shared;
 use crate::{connection::Connection, frame::Frame};
 use bytes::{Bytes, BytesMut};
-use std::collections::VecDeque;
+use dashmap::mapref::entry::Entry;
 use std::io::{Error, ErrorKind, Result};
 
 #[derive(Debug, Clone)]
@@ -32,7 +32,7 @@ impl ListPush {
         Ok(Self { key, values, left })
     }
 
-    async fn extend(l: &mut VecDeque<BytesMut>, values: Vec<BytesMut>, left: bool) {
+    fn extend(l: &mut RudisList, values: Vec<BytesMut>, left: bool) {
         if left {
             for value in values {
                 l.push_front(value);
@@ -43,26 +43,26 @@ impl ListPush {
     }
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
-        let mut db = db.write().await;
-
-        match db.lookup_write(&self.key.clone()) {
-            Some(RudisObject::List(l)) => {
-                Self::extend(l, self.values, self.left).await;
-                dst.write_frame(&Frame::Integer(l.len() as u64)).await?;
-                Ok(())
-            }
-            Some(_) => {
-                dst.write_frame(&shared::wrong_type_err).await?;
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "WRONGTYPE Operation against a key holding the wrong kind of value",
-                ));
-            }
-            None => {
-                let mut l = VecDeque::new();
-                Self::extend(&mut l, self.values, self.left).await;
+        match db.entry(self.key) {
+            Entry::Occupied(mut x) => match &mut x.get_mut().value {
+                RudisObject::List(l) => {
+                    Self::extend(l, self.values, self.left);
+                    dst.write_frame(&Frame::Integer(l.len() as u64)).await?;
+                    Ok(())
+                }
+                _ => {
+                    dst.write_frame(&shared::wrong_type_err).await?;
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "WRONGTYPE Operation against a key holding the wrong kind of value",
+                    ));
+                }
+            },
+            Entry::Vacant(ve) => {
+                let mut l = RudisList::new();
+                Self::extend(&mut l, self.values, self.left);
                 let len = l.len();
-                db.insert(self.key, RudisObject::new_list_from(l), None);
+                ve.insert(DictValue::new(RudisObject::List(l), None));
                 dst.write_frame(&Frame::Integer(len as u64)).await?;
                 Ok(())
             }
@@ -108,33 +108,33 @@ impl ListPop {
     }
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
-        let mut db = db.write().await;
-
-        match db.lookup_write(&self.key.clone()) {
-            Some(RudisObject::List(l)) => {
-                let response = if self.left {
-                    l.pop_front()
-                } else {
-                    l.pop_back()
-                };
-                if l.is_empty() {
-                    db.remove(&self.key);
+        match db.get_mut(&self.key) {
+            Some(mut entry) => match &mut entry.value {
+                RudisObject::List(l) => {
+                    let response = if self.left {
+                        l.pop_front()
+                    } else {
+                        l.pop_back()
+                    };
+                    if l.is_empty() {
+                        db.remove(&self.key);
+                    }
+                    if let Some(value) = response {
+                        dst.write_frame(&Frame::new_bulk_from(value).sealed()?)
+                            .await?;
+                    } else {
+                        dst.write_frame(&Frame::Null).await?;
+                    }
+                    Ok(())
                 }
-                if let Some(value) = response {
-                    dst.write_frame(&Frame::new_bulk_from(value).sealed()?)
-                        .await?;
-                } else {
-                    dst.write_frame(&Frame::Null).await?;
+                _ => {
+                    dst.write_frame(&shared::wrong_type_err).await?;
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "WRONGTYPE Operation against a key holding the wrong kind of value",
+                    ));
                 }
-                Ok(())
-            }
-            Some(_) => {
-                dst.write_frame(&shared::wrong_type_err).await?;
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "WRONGTYPE Operation against a key holding the wrong kind of value",
-                ));
-            }
+            },
             None => {
                 dst.write_frame(&Frame::Null).await?;
                 Ok(())

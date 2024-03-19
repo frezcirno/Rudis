@@ -31,7 +31,6 @@ impl Del {
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         let mut count = 0;
         {
-            let mut db = db.write().await;
             for key in self.keys {
                 if db.remove(&key).is_some() {
                     count += 1;
@@ -69,8 +68,7 @@ impl Exists {
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         let response = {
-            let mut db = db.write().await;
-            if db.lookup_read(&self.key).is_some() {
+            if db.get(&self.key).is_some() {
                 Frame::Integer(1)
             } else {
                 Frame::Integer(0)
@@ -112,12 +110,10 @@ impl Keys {
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         let allkeys = &self.pattern[..] == b"*";
         let res = {
-            let db = db.read().await;
             Frame::Array(
-                db.keys()
-                    .iter()
-                    .filter(|key| allkeys || self.pattern == key.as_ref())
-                    .map(|key| Frame::Bulk(key.clone()))
+                db.iter()
+                    .filter(|it| allkeys || self.pattern == it.key())
+                    .map(|it| Frame::Bulk(it.key().clone()))
                     .collect(),
             )
         };
@@ -151,9 +147,8 @@ impl Type {
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         let response = {
-            let mut db = db.write().await;
-            if let Some(obj) = db.lookup_read(&self.key) {
-                match obj {
+            if let Some(entry) = db.get(&self.key) {
+                match &entry.value {
                     RudisObject::String(_) => Frame::Simple(Bytes::from_static(b"string")),
                     RudisObject::List(_) => Frame::Simple(Bytes::from_static(b"list")),
                     RudisObject::Set(_) => Frame::Simple(Bytes::from_static(b"set")),
@@ -226,7 +221,6 @@ impl Rename {
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         let response = {
-            let mut db = db.write().await;
             if db.rename(&self.key, self.newkey) {
                 Frame::Simple(Bytes::from_static(b"OK"))
             } else {
@@ -271,7 +265,6 @@ impl Expire {
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         let response = {
-            let mut db = db.write().await;
             if db.expire_at(&self.key, self.expire_at_ms()) {
                 Frame::Integer(1)
             } else {
@@ -316,7 +309,6 @@ impl ExpireAt {
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         let response = {
-            let mut db = db.write().await;
             if db.expire_at(&self.key, self.expire_at_ms()) {
                 Frame::Integer(1)
             } else {
@@ -361,7 +353,6 @@ impl PExpire {
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         let response = {
-            let mut db = db.write().await;
             if db.expire_at(&self.key, self.expire_at_ms()) {
                 Frame::Integer(1)
             } else {
@@ -406,7 +397,6 @@ impl PExpireAt {
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         let response = {
-            let mut db = db.write().await;
             if db.expire_at(&self.key, self.expire_at_ms()) {
                 Frame::Integer(1)
             } else {

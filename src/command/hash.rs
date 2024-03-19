@@ -1,9 +1,10 @@
 use super::CommandParser;
-use crate::dbms::DatabaseRef;
+use crate::dbms::{DatabaseRef, DictValue};
 use crate::object::RudisObject;
 use crate::shared;
 use crate::{connection::Connection, frame::Frame};
 use bytes::{Bytes, BytesMut};
+use dashmap::mapref::entry::Entry;
 use std::io::{Error, ErrorKind, Result};
 
 #[derive(Debug, Clone)]
@@ -28,25 +29,25 @@ impl HSet {
     }
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
-        let mut db = db.write().await;
-
-        match db.lookup_write(&self.key.clone()) {
-            Some(RudisObject::Hash(h)) => {
-                h.insert(self.field, BytesMut::from_iter(self.value));
-                dst.write_frame(&Frame::Integer(1)).await?;
-                Ok(())
-            }
-            Some(_) => {
-                dst.write_frame(&shared::wrong_type_err).await?;
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "WRONGTYPE Operation against a key holding the wrong kind of value",
-                ));
-            }
-            None => {
+        match db.entry(self.key) {
+            Entry::Occupied(mut oe) => match &mut oe.get_mut().value {
+                RudisObject::Hash(h) => {
+                    h.insert(self.field, BytesMut::from(&self.value[..]));
+                    dst.write_frame(&Frame::Integer(1)).await?;
+                    Ok(())
+                }
+                _ => {
+                    dst.write_frame(&shared::wrong_type_err).await?;
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "WRONGTYPE Operation against a key holding the wrong kind of value",
+                    ));
+                }
+            },
+            Entry::Vacant(ve) => {
                 let mut h = std::collections::HashMap::new();
-                h.insert(self.field, BytesMut::from_iter(self.value));
-                db.insert(self.key.clone(), RudisObject::new_hash_from(h), None);
+                h.insert(self.field, BytesMut::from(&self.value[..]));
+                ve.insert(DictValue::new(RudisObject::new_hash_from(h), None));
                 dst.write_frame(&Frame::Integer(1)).await?;
                 Ok(())
             }
@@ -82,25 +83,25 @@ impl HGet {
     }
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
-        let mut db = db.write().await;
-
-        match db.lookup_read(&self.key) {
-            Some(RudisObject::Hash(h)) => {
-                if let Some(value) = h.get(&self.field) {
-                    dst.write_frame(&Frame::Bulk(value.clone().freeze()))
-                        .await?;
-                } else {
-                    dst.write_frame(&Frame::Null).await?;
+        match db.get(&self.key) {
+            Some(entry) => match &entry.value {
+                RudisObject::Hash(h) => {
+                    if let Some(value) = h.get(&self.field) {
+                        dst.write_frame(&Frame::Bulk(value.clone().freeze()))
+                            .await?;
+                    } else {
+                        dst.write_frame(&Frame::Null).await?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            Some(_) => {
-                dst.write_frame(&shared::wrong_type_err).await?;
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "WRONGTYPE Operation against a key holding the wrong kind of value",
-                ));
-            }
+                _ => {
+                    dst.write_frame(&shared::wrong_type_err).await?;
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "WRONGTYPE Operation against a key holding the wrong kind of value",
+                    ));
+                }
+            },
             None => {
                 dst.write_frame(&Frame::Null).await?;
                 Ok(())

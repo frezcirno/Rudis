@@ -1,9 +1,10 @@
 use super::CommandParser;
-use crate::dbms::DatabaseRef;
+use crate::dbms::{DatabaseRef, DictValue};
 use crate::object::RudisObject;
 use crate::shared;
 use crate::{connection::Connection, frame::Frame};
 use bytes::{Bytes, BytesMut};
+use dashmap::mapref::entry::Entry;
 use std::io::{Error, ErrorKind, Result};
 
 #[derive(Debug, Clone)]
@@ -22,11 +23,10 @@ impl Get {
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         // Get the value from the shared database state
         let response = {
-            let mut lock = db.write().await;
-            if let Some(value) = lock.lookup_read(&self.key) {
+            if let Some(entry) = db.get(&self.key) {
                 // If a value is present, it is written to the client in "bulk"
                 // format.
-                value.serialize()
+                entry.value.serialize()
             } else {
                 // If there is no value, `Null` is written.
                 Frame::Null
@@ -105,23 +105,41 @@ impl Set {
     }
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
-        // validate nx and xx
-        let mut db = db.write().await;
+        match db.entry(self.key) {
+            Entry::Occupied(mut oe) => {
+                if self.flags & REDIS_SET_NX != 0 {
+                    dst.write_frame(&shared::null_bulk).await.unwrap();
+                    return Ok(());
+                }
 
-        if self.flags & REDIS_SET_NX != 0 && db.contains_key(&self.key)
-            || self.flags & REDIS_SET_XX != 0 && !db.contains_key(&self.key)
-        {
-            drop(db);
+                {
+                    let entry = oe.get_mut();
+                    entry.value = RudisObject::new_string_from(self.val);
+                    entry.expire_at = self.expire.map(|ms| shared::now_ms() + ms);
+                }
 
-            dst.write_frame(&shared::null_bulk).await.unwrap();
-        } else {
-            let value = RudisObject::new_string_from(self.val);
-            db.insert(self.key, value, self.expire);
-            drop(db);
+                drop(oe);
 
-            dst.write_frame(&shared::ok).await?;
+                dst.write_frame(&shared::ok).await.unwrap();
+
+                Ok(())
+            }
+            Entry::Vacant(ve) => {
+                if self.flags & REDIS_SET_XX != 0 {
+                    dst.write_frame(&shared::null_bulk).await.unwrap();
+                    return Ok(());
+                }
+
+                ve.insert(DictValue::new(
+                    RudisObject::new_string_from(self.val),
+                    self.expire.map(|ms| shared::now_ms() + ms),
+                ));
+
+                dst.write_frame(&shared::ok).await.unwrap();
+
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     pub fn rewrite(&self) -> BytesMut {
@@ -164,21 +182,25 @@ impl Append {
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         // Append the value to the shared database state
         let response = {
-            let mut lock = db.write().await;
-            if let Some(value) = lock.lookup_write(&self.key) {
-                if let RudisObject::String(s) = value {
-                    s.value.extend_from_slice(&self.value);
-                    Frame::Integer(s.len() as u64)
-                } else {
-                    Frame::Error(Bytes::from_static(
-                        b"Operation against a key holding the wrong kind of value",
-                    ))
+            // locked write
+            match db.entry(self.key) {
+                Entry::Occupied(mut oe) => {
+                    if let RudisObject::String(s) = &mut oe.get_mut().value {
+                        s.extend_from_slice(&self.value);
+                        Frame::Integer(s.len() as u64)
+                    } else {
+                        Frame::Error(Bytes::from_static(
+                            b"Operation against a key holding the wrong kind of value",
+                        ))
+                    }
                 }
-            } else {
-                let mut_val: BytesMut = BytesMut::from(&self.value[..]);
-                lock.dict
-                    .insert(self.key.clone(), RudisObject::new_string_from(mut_val));
-                Frame::Integer(self.value.len() as u64)
+                Entry::Vacant(ve) => {
+                    ve.insert(DictValue::new(
+                        RudisObject::new_string_from(BytesMut::from(&self.value[..])),
+                        None,
+                    ));
+                    Frame::Integer(self.value.len() as u64)
+                }
             }
         };
 
@@ -214,9 +236,8 @@ impl Strlen {
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
         // Get the value from the shared database state
         let response = {
-            let mut lock = db.write().await;
-            if let Some(value) = lock.lookup_read(&self.key) {
-                if let RudisObject::String(s) = value {
+            if let Some(entry) = db.get(&self.key) {
+                if let RudisObject::String(s) = &entry.value {
                     Frame::Integer(s.len() as u64)
                 } else {
                     Frame::Error(Bytes::from_static(

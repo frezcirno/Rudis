@@ -148,11 +148,9 @@ impl Server {
             // for db in self.dbs.iter() {
             let db = self.dbms.get(0);
             let index = db.index;
-            let db = db.read().await;
             let size = db.dict.capacity();
             let used = db.dict.len();
-            let vkeys = db.expires.len();
-            drop(db);
+            let vkeys = db.iter().filter(|it| it.is_volatile()).count();
             if used > 0 || vkeys > 0 {
                 log::info!(
                     "DB {}: {} keys ({} volatile) in {} slots",

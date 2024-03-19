@@ -1,9 +1,11 @@
 use super::CommandParser;
-use crate::dbms::DatabaseRef;
+use crate::dbms::{DatabaseRef, DictValue};
 use crate::object::RudisObject;
 use crate::shared;
 use crate::{connection::Connection, frame::Frame};
 use bytes::{Bytes, BytesMut};
+use dashmap::mapref::entry::Entry;
+use std::collections::HashSet;
 use std::io::{Error, ErrorKind, Result};
 
 #[derive(Debug, Clone)]
@@ -25,34 +27,34 @@ impl SAdd {
     }
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
-        let mut db = db.write().await;
-
-        match db.lookup_write(&self.key.clone()) {
-            Some(RudisObject::Set(s)) => {
-                let mut added = 0;
-                for member in self.members {
-                    if s.insert(member) {
-                        added += 1;
+        match db.entry(self.key) {
+            Entry::Occupied(mut oe) => match &mut oe.get_mut().value {
+                RudisObject::Set(s) => {
+                    let mut added = 0;
+                    for member in self.members {
+                        if s.insert(member) {
+                            added += 1;
+                        }
                     }
+                    dst.write_frame(&Frame::new_integer_from(added as u64))
+                        .await?;
+                    Ok(())
                 }
-                dst.write_frame(&Frame::new_integer_from(added as u64))
-                    .await?;
-                Ok(())
-            }
-            Some(_) => {
-                dst.write_frame(&shared::wrong_type_err).await?;
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "WRONGTYPE Operation against a key holding the wrong kind of value",
-                ));
-            }
-            None => {
-                let mut s = std::collections::HashSet::new();
+                _ => {
+                    dst.write_frame(&shared::wrong_type_err).await?;
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "WRONGTYPE Operation against a key holding the wrong kind of value",
+                    ));
+                }
+            },
+            Entry::Vacant(ve) => {
+                let mut s = HashSet::new();
                 let len = self.members.len();
                 for member in self.members {
                     s.insert(member);
                 }
-                db.insert(self.key.clone(), RudisObject::new_set_from(s), None);
+                ve.insert(DictValue::new(RudisObject::new_set_from(s), None));
                 dst.write_frame(&Frame::new_integer_from(len as u64))
                     .await?;
                 Ok(())
@@ -92,26 +94,26 @@ impl SRem {
     }
 
     pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
-        let mut db = db.write().await;
-
-        match db.lookup_write(&self.key.clone()) {
-            Some(RudisObject::Set(s)) => {
-                let mut removed = 0;
-                for member in self.members {
-                    if s.remove(&member) {
-                        removed += 1;
+        match db.get_mut(&self.key) {
+            Some(mut entry) => match &mut entry.value {
+                RudisObject::Set(s) => {
+                    let mut removed = 0;
+                    for member in self.members {
+                        if s.remove(&member) {
+                            removed += 1;
+                        }
                     }
+                    dst.write_frame(&Frame::Integer(removed as u64)).await?;
+                    Ok(())
                 }
-                dst.write_frame(&Frame::Integer(removed as u64)).await?;
-                Ok(())
-            }
-            Some(_) => {
-                dst.write_frame(&shared::wrong_type_err).await?;
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "WRONGTYPE Operation against a key holding the wrong kind of value",
-                ));
-            }
+                _ => {
+                    dst.write_frame(&shared::wrong_type_err).await?;
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "WRONGTYPE Operation against a key holding the wrong kind of value",
+                    ));
+                }
+            },
             None => {
                 dst.write_frame(&Frame::Integer(0)).await?;
                 Ok(())

@@ -22,6 +22,12 @@ impl Deref for RudisString {
     }
 }
 
+impl DerefMut for RudisString {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RudisList {
     value: VecDeque<BytesMut>,

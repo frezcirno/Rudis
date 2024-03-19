@@ -163,26 +163,24 @@ impl DatabaseManager {
         aof.extend_bulk_string(b"SELECT" as &[u8]);
         aof.extend_bulk_string(db.index.to_string().as_bytes());
 
-        let db = db.read().await;
-        for (key, value) in db.dict.iter() {
-            let expire = db.expires.get(key);
-            if expire.is_some_and(|e| *e < now) {
+        for it in db.iter() {
+            if it.is_expired() {
                 continue;
             }
 
-            match value {
-                RudisObject::String(s) => aof.rewrite_string(&key, &s),
-                RudisObject::List(l) => aof.rewrite_list(&key, &l),
-                RudisObject::Set(s) => aof.rewrite_set(&key, &s),
-                RudisObject::Hash(h) => aof.rewrite_hash(&key, &h),
-                RudisObject::ZSet(z) => aof.rewrite_zset(&key, &z),
+            match &it.value {
+                RudisObject::String(s) => aof.rewrite_string(&it.key(), &s),
+                RudisObject::List(l) => aof.rewrite_list(&it.key(), &l),
+                RudisObject::Set(s) => aof.rewrite_set(&it.key(), &s),
+                RudisObject::Hash(h) => aof.rewrite_hash(&it.key(), &h),
+                RudisObject::ZSet(z) => aof.rewrite_zset(&it.key(), &z),
             }
 
-            if let Some(expire) = expire {
+            if let Some(expire) = &it.expire_at {
                 // "PEXPIREAT key timestamp"
                 aof.extend_array(3);
                 aof.extend_bulk_string(b"PEXPIREAT" as &[u8]);
-                aof.extend_bulk_string(&key[..]);
+                aof.extend_bulk_string(&it.key()[..]);
                 aof.extend_bulk_string(expire.to_string().as_bytes());
             }
         }

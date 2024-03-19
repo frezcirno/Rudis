@@ -7,7 +7,6 @@ use crate::shared;
 use std::io::Result;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
 const REDIS_MULTI: u32 = 1 << 3;

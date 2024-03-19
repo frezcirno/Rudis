@@ -1,16 +1,17 @@
-use crate::aof::{AofFsync, AofState, AofWriter};
+use crate::aof::{AofState, AofWriter};
 use crate::config::ConfigRef;
 use crate::object::RudisObject;
 use crate::rdb::Rdb;
 use crate::shared;
 use bytes::{Bytes, BytesMut};
-use std::collections::HashMap;
+use dashmap::mapref::entry::Entry;
+use dashmap::mapref::one::{Ref, RefMut};
+use dashmap::DashMap;
 use std::io::ErrorKind;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::fs::File;
-use tokio::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use tokio::task::JoinHandle;
 
 static mut ID: AtomicU32 = AtomicU32::new(0);
@@ -61,7 +62,7 @@ impl DatabaseManager {
     //     self.inner.len()
     // }
 
-    pub fn get(&self, index: usize) -> DatabaseRef {
+    pub fn get(&self, _index: usize) -> DatabaseRef {
         // self.inner[index].clone()
         self.dbs.clone()
     }
@@ -113,109 +114,140 @@ impl Deref for DatabaseManager {
 #[derive(Default, Clone)]
 pub struct DatabaseRef {
     pub index: u32,
-    inner: Arc<RwLock<Dict>>,
+    inner: Arc<Dict>,
 }
 
 impl DatabaseRef {
     pub fn new() -> DatabaseRef {
         DatabaseRef {
             index: unsafe { ID.fetch_add(1, Ordering::Relaxed) },
-            inner: Arc::new(RwLock::new(Dict {
-                dict: HashMap::new(),
-                expires: HashMap::new(),
-            })),
+            inner: Arc::new(Dict::new()),
         }
     }
 }
 
 impl Deref for DatabaseRef {
-    type Target = Arc<RwLock<Dict>>;
+    type Target = Arc<Dict>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
 }
 
-#[derive(Default, Clone)]
-pub struct Dict {
-    pub dict: HashMap<Bytes, RudisObject>,
-    pub expires: HashMap<Bytes, u64>, // millisecond timestamp
+impl DerefMut for DatabaseRef {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
 }
 
-impl Dict {
-    fn check_expired(&mut self, key: &Bytes) -> bool {
-        if let Some(t) = self.expires.get(key) {
+#[derive(Debug, Clone)]
+pub struct DictValue {
+    pub value: RudisObject,
+    pub expire_at: Option<u64>,
+}
+
+impl DictValue {
+    pub fn new(value: RudisObject, expire_at: Option<u64>) -> DictValue {
+        DictValue { value, expire_at }
+    }
+
+    pub fn is_volatile(&self) -> bool {
+        self.expire_at.is_some()
+    }
+
+    pub fn is_expired(&self) -> bool {
+        if let Some(expire) = self.expire_at {
             let now = shared::now_ms();
-            if now > *t {
-                self.dict.remove(key);
-                self.expires.remove(key);
+            if now > expire {
                 return true;
             }
         }
-
         false
     }
+}
 
-    pub fn lookup_read(&mut self, key: &Bytes) -> Option<&RudisObject> {
-        self.check_expired(key);
-        if let Some(v) = self.dict.get(key) {
-            Some(v)
-        } else {
-            None
+#[derive(Default)]
+pub struct Dict {
+    pub dict: DashMap<Bytes, DictValue>, // millisecond timestamp
+}
+
+impl Dict {
+    pub fn new() -> Dict {
+        Dict {
+            dict: DashMap::new(),
         }
     }
 
-    pub fn lookup_write(&mut self, key: &Bytes) -> Option<&mut RudisObject> {
+    pub fn check_expired(&self, key: &Bytes) {
+        if let Some(entry) = self.dict.get(key) {
+            if entry.is_expired() {
+                self.dict.remove(key);
+            }
+        }
+    }
+
+    pub fn get(&self, key: &Bytes) -> Option<Ref<'_, Bytes, DictValue>> {
+        self.check_expired(key);
+        self.dict.get(key)
+    }
+
+    pub fn get_mut(&self, key: &Bytes) -> Option<RefMut<'_, Bytes, DictValue>> {
         self.check_expired(key);
         self.dict.get_mut(key)
     }
 
-    pub fn remove(&mut self, key: &Bytes) -> Option<RudisObject> {
+    pub fn remove(&self, key: &Bytes) -> Option<(Bytes, DictValue)> {
         self.check_expired(key);
-        self.expires.remove(key);
         self.dict.remove(key)
     }
 
-    pub fn len(&self) -> usize {
-        self.dict.len()
-    }
-
-    pub fn keys(&self) -> Vec<Bytes> {
-        self.dict.keys().cloned().collect()
+    pub fn entry(&self, key: Bytes) -> Entry<'_, Bytes, DictValue> {
+        self.check_expired(&key);
+        self.dict.entry(key)
     }
 
     pub fn contains_key(&self, key: &Bytes) -> bool {
-        self.dict.contains_key(key)
+        self.get(key).is_some()
     }
 
-    pub fn insert(&mut self, key: Bytes, value: RudisObject, expire: Option<u64>) {
-        self.dict.insert(key.clone(), value);
-
-        if let Some(expire) = expire {
-            let now = shared::now_ms();
-            self.expires.insert(key, now + expire);
-        }
+    pub fn insert(
+        &self,
+        key: Bytes,
+        value: RudisObject,
+        expire_at: Option<u64>,
+    ) -> Option<DictValue> {
+        self.dict.insert(key, DictValue::new(value, expire_at))
     }
 
-    pub fn rename(&mut self, key: &Bytes, new_key: Bytes) -> bool {
+    pub fn rename(&self, key: &Bytes, new_key: Bytes) -> bool {
         if let Some(v) = self.dict.remove(key) {
-            self.dict.insert(new_key.clone(), v);
-            // rename expire
-            if let Some(t) = self.expires.remove(key) {
-                self.expires.insert(new_key, t);
-            }
+            self.dict.insert(new_key.clone(), v.1);
             true
         } else {
             false
         }
     }
 
-    pub fn expire_at(&mut self, key: &Bytes, expire_at_ms: u64) -> bool {
-        if self.dict.contains_key(key) {
-            self.expires.insert(key.clone(), expire_at_ms);
+    pub fn expire_at(&self, key: &Bytes, expire_at_ms: u64) -> bool {
+        if let Some(mut v) = self.dict.get_mut(key) {
+            v.expire_at = Some(expire_at_ms);
             true
         } else {
             false
         }
+    }
+}
+
+impl Deref for Dict {
+    type Target = DashMap<Bytes, DictValue>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.dict
+    }
+}
+
+impl DerefMut for Dict {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.dict
     }
 }
