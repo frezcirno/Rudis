@@ -151,11 +151,18 @@ impl Frame {
 
                 // parse each into array
                 if let Some(line) = Self::next_line(src) {
-                    let frames = line
-                        .split(|&b| b == b' ')
-                        .map(|s| Frame::Bulk(Bytes::copy_from_slice(s)))
-                        .collect();
-                    return Ok(Some(Frame::Array(frames)));
+                    return Ok(Some(Frame::Array(
+                        line.split(|&b| b == b' ')
+                            .map(|s| {
+                                if let Ok(s) = std::str::from_utf8(s) {
+                                    if let Ok(n) = u64::from_str(s) {
+                                        return Frame::Integer(n as u64);
+                                    }
+                                }
+                                Frame::Bulk(Bytes::copy_from_slice(s))
+                            })
+                            .collect(),
+                    )));
                 }
             }
         } // match
