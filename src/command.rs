@@ -12,13 +12,13 @@ use crate::aof::{AofFsync, AofOption};
 use crate::client::Client;
 use crate::config::Verbosity;
 use crate::frame::Frame;
-use crate::rdb::{AutoSave, Rdb};
+use crate::rdb::AutoSave;
 use crate::shared;
 use aof::BgRewriteAof;
 use bytes::Bytes;
 use config::{ConfigGet, ConfigResetStat, ConfigRewrite, ConfigSet};
 use db::{
-    DbSize, Del, Exists, Expire, ExpireAt, Keys, PExpire, PExpireAt, Rename, Select, Shutdown,
+    DbSize, Del, Exists, Expire, ExpireAt, Keys, PExpire, PExpireAt, Rename, Select, Shutdown, Type,
 };
 use hash::{HGet, HSet};
 use list::{ListPop, ListPush};
@@ -26,7 +26,6 @@ use ping::{Ping, Quit};
 use rdb::{BgSave, Save};
 use set::{SAdd, SRem};
 use std::io::{Error, ErrorKind, Result};
-use std::sync::atomic::Ordering;
 use std::vec;
 use string::{Append, Get, Set, Strlen};
 use tokio::fs::File;
@@ -72,6 +71,13 @@ impl CommandParser {
     pub fn next_integer(&mut self) -> Result<Option<u64>> {
         if let Some(frame) = self.next() {
             match frame {
+                Frame::Bulk(b) => match std::str::from_utf8(&b[..]) {
+                    Ok(s) => match s.parse() {
+                        Ok(n) => Ok(Some(n)),
+                        Err(_) => Err(Error::new(ErrorKind::Other, "not an integer")),
+                    },
+                    Err(_) => Err(Error::new(ErrorKind::Other, "not an integer")),
+                },
                 Frame::Integer(n) => Ok(Some(n)),
                 _ => Err(Error::new(ErrorKind::Other, "not an integer")),
             }
@@ -102,6 +108,7 @@ pub enum Command {
     ExpireAt(ExpireAt),
     PExpire(PExpire),
     PExpireAt(PExpireAt),
+    Type(Type),
 
     LPush(ListPush),
     RPush(ListPush),
@@ -163,6 +170,7 @@ impl Command {
             b"expireat" => Command::ExpireAt(ExpireAt::from(&mut parser)?),
             b"pexpire" => Command::PExpire(PExpire::from(&mut parser)?),
             b"pexpireat" => Command::PExpireAt(PExpireAt::from(&mut parser)?),
+            b"type" => Command::Type(Type::from(&mut parser)?),
 
             b"lpush" => Command::LPush(ListPush::from(&mut parser, true)?),
             b"rpush" => Command::RPush(ListPush::from(&mut parser, true)?),
@@ -211,188 +219,164 @@ impl Command {
 }
 
 impl Client {
-    pub async fn execute_cmd(&mut self, cmd: Command) -> Result<()> {
+    pub async fn handle_command(&mut self, cmd: Command) -> Result<()> {
         match cmd {
             Command::Select(cmd) => {
                 if let Ok(()) = self.select(cmd.index as usize) {
-                    self.connection.write_frame(&shared::ok).await?;
+                    self.write_frame(&shared::ok).await?;
                 } else {
-                    self.connection
-                        .write_frame(&Frame::Error(Bytes::from_static(b"ERR invalid db index")))
+                    self.write_frame(&Frame::Error(Bytes::from_static(b"ERR invalid db index")))
                         .await?;
                 }
             }
             Command::DbSize(_) => {
                 // let len = self.dbs.len();
                 let len = 1; // only one database for now
-                self.connection
-                    .write_frame(&Frame::Integer(len as u64))
-                    .await?;
+                self.write_frame(&Frame::Integer(len as u64)).await?;
                 // continue;
             }
             Command::Save(_) => {
                 if self.server.rdb_state.read().await.rdb_child_pid.is_some() {
-                    self.connection
-                        .write_frame(&Frame::Error(Bytes::from_static(
-                            b"ERR background save is running",
-                        )))
-                        .await?;
+                    self.write_frame(&Frame::Error(Bytes::from_static(
+                        b"ERR background save is running",
+                    )))
+                    .await?;
                     return Ok(());
                 }
-                let config = self.config.clone();
-                let file = File::create(&config.read().await.rdb_filename).await?;
-                let mut rdb = Rdb::from_file(file);
-                self.server.save(&mut rdb).await?;
-                self.connection.write_frame(&shared::ok).await?;
+                let mut file = File::create(&self.config.read().await.rdb_filename).await?;
+                self.server.save(&mut file).await?;
+                self.write_frame(&shared::ok).await?;
             }
             Command::BgSave(_) => {
                 if self.server.rdb_state.read().await.rdb_child_pid.is_some() {
-                    self.connection
-                        .write_frame(&Frame::Error(Bytes::from_static(
-                            b"ERR background save is running",
-                        )))
-                        .await?;
+                    self.write_frame(&Frame::Error(Bytes::from_static(
+                        b"ERR background save is running",
+                    )))
+                    .await?;
                     return Ok(());
                 }
                 self.server.background_save().await?;
-                self.connection.write_frame(&shared::ok).await?;
+                self.write_frame(&shared::ok).await?;
             }
             Command::BgRewriteAof(_) => {
-                if self
-                    .server
-                    .aof_state
-                    .read()
-                    .await
-                    .aof_child_pid
-                    .is_some()
-                {
+                if self.server.aof_state.read().await.aof_child_pid.is_some() {
                     // aof rewrite is running
-                    self.connection
-                        .write_frame(&Frame::Error(Bytes::from_static(
-                            b"ERR background rewrite is running",
-                        )))
-                        .await?;
+                    self.write_frame(&Frame::Error(Bytes::from_static(
+                        b"ERR background rewrite is running",
+                    )))
+                    .await?;
                 } else if self.server.rdb_state.read().await.rdb_child_pid.is_some() {
                     // rdb save is running: schedule aof rewrite
                     self.server.aof_state.write().await.aof_rewrite_scheduled = true;
-                    self.connection
-                        .write_frame(&Frame::Simple(Bytes::from_static(b"BgAofRewrite schduled")))
+                    self.write_frame(&Frame::Simple(Bytes::from_static(b"BgAofRewrite schduled")))
                         .await?;
-                } else if self
-                    .server
-                    // start aof rewrite in background
-                    .rewrite_append_only_file_background()
-                    .await
-                    .is_err()
-                {
-                    // start aof rewrite failed
-                    self.connection
-                        .write_frame(&Frame::Error(Bytes::from_static(
+                } else {
+                    let res = self
+                        .server
+                        // start aof rewrite in background
+                        .rewrite_append_only_file_background(
+                            &mut self.server.aof_state.write().await,
+                        )
+                        .await;
+                    if res.is_err() {
+                        // start aof rewrite failed
+                        self.write_frame(&Frame::Error(Bytes::from_static(
                             b"ERR background rewrite error",
                         )))
                         .await?;
-                } else {
-                    // start aof rewrite success
-                    self.connection.write_frame(&shared::ok).await?;
+                    } else {
+                        // start aof rewrite success
+                        self.write_frame(&shared::ok).await?;
+                    }
                 }
             }
 
-            Command::Ping(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
+            Command::Ping(cmd) => cmd.apply(self).await?,
             Command::Quit(_) => {
-                self.quit.store(true, Ordering::Relaxed);
-                self.connection.write_frame(&shared::ok).await?;
+                self.server.quit_ch.send(());
+                self.write_frame(&shared::ok).await?;
             }
 
-            Command::Get(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::Set(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::Append(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::Strlen(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
+            Command::Get(cmd) => cmd.apply(self).await?,
+            Command::Set(cmd) => cmd.apply(self).await?,
+            Command::Append(cmd) => cmd.apply(self).await?,
+            Command::Strlen(cmd) => cmd.apply(self).await?,
 
-            Command::Del(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::Exists(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::Keys(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::Shutdown(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::Rename(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::Expire(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::ExpireAt(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::PExpire(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::PExpireAt(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
+            Command::Del(cmd) => cmd.apply(self).await?,
+            Command::Exists(cmd) => cmd.apply(self).await?,
+            Command::Keys(cmd) => cmd.apply(self).await?,
+            Command::Shutdown(cmd) => cmd.apply(self).await?,
+            Command::Rename(cmd) => cmd.apply(self).await?,
+            Command::Expire(cmd) => cmd.apply(self).await?,
+            Command::ExpireAt(cmd) => cmd.apply(self).await?,
+            Command::PExpire(cmd) => cmd.apply(self).await?,
+            Command::PExpireAt(cmd) => cmd.apply(self).await?,
+            Command::Type(cmd) => cmd.apply(self).await?,
 
-            Command::LPush(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::RPush(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::LPop(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::RPop(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
+            Command::LPush(cmd) => cmd.apply(self).await?,
+            Command::RPush(cmd) => cmd.apply(self).await?,
+            Command::LPop(cmd) => cmd.apply(self).await?,
+            Command::RPop(cmd) => cmd.apply(self).await?,
 
-            Command::HSet(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::HGet(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
+            Command::HSet(cmd) => cmd.apply(self).await?,
+            Command::HGet(cmd) => cmd.apply(self).await?,
 
-            Command::SAdd(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
-            Command::SRem(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
+            Command::SAdd(cmd) => cmd.apply(self).await?,
+            Command::SRem(cmd) => cmd.apply(self).await?,
 
             Command::ConfigGet(cmd) => {
                 let config = self.config.clone();
                 match &cmd.key[..] {
                     b"dbfilename" => {
-                        self.connection
-                            .write_frame(&Frame::Array(vec![
-                                Frame::Bulk(cmd.key),
-                                Frame::new_bulk_from(config.read().await.rdb_filename.clone()),
-                            ]))
-                            .await?;
+                        self.write_frame(&Frame::Array(vec![
+                            Frame::Bulk(cmd.key),
+                            Frame::new_bulk_from(config.read().await.rdb_filename.clone()),
+                        ]))
+                        .await?;
                     }
                     b"port" => {
-                        self.connection
-                            .write_frame(&Frame::Array(vec![
-                                Frame::Bulk(cmd.key),
-                                Frame::new_bulk_from(config.read().await.port.to_string()),
-                            ]))
-                            .await?;
+                        self.write_frame(&Frame::Array(vec![
+                            Frame::Bulk(cmd.key),
+                            Frame::new_bulk_from(config.read().await.port.to_string()),
+                        ]))
+                        .await?;
                     }
                     b"databases" => {
-                        self.connection
-                            .write_frame(&Frame::Array(vec![
-                                Frame::Bulk(cmd.key),
-                                Frame::new_bulk_from(config.read().await.db_num.to_string()),
-                            ]))
-                            .await?;
+                        self.write_frame(&Frame::Array(vec![
+                            Frame::Bulk(cmd.key),
+                            Frame::new_bulk_from(config.read().await.db_num.to_string()),
+                        ]))
+                        .await?;
                     }
                     b"hz" => {
-                        self.connection
-                            .write_frame(&Frame::Array(vec![
-                                Frame::Bulk(cmd.key),
-                                Frame::new_bulk_from(config.read().await.hz.to_string()),
-                            ]))
-                            .await?;
+                        self.write_frame(&Frame::Array(vec![
+                            Frame::Bulk(cmd.key),
+                            Frame::new_bulk_from(config.read().await.hz.to_string()),
+                        ]))
+                        .await?;
                     }
                     b"appendonly" => {
-                        self.connection
-                            .write_frame(&Frame::Array(vec![
-                                Frame::Bulk(cmd.key),
-                                Frame::new_bulk_from(
-                                    self.config.read().await.aof_state.to_string(),
-                                ),
-                            ]))
-                            .await?;
+                        self.write_frame(&Frame::Array(vec![
+                            Frame::Bulk(cmd.key),
+                            Frame::new_bulk_from(config.read().await.aof_state.to_string()),
+                        ]))
+                        .await?;
                     }
                     b"dir" => {
                         // cwd
                         let cwd = std::env::current_dir().unwrap();
-                        self.connection
-                            .write_frame(&Frame::Array(vec![
-                                Frame::Bulk(cmd.key),
-                                Frame::new_bulk_from_slice(cwd.to_str().unwrap().as_bytes()),
-                            ]))
-                            .await?;
+                        self.write_frame(&Frame::Array(vec![
+                            Frame::Bulk(cmd.key),
+                            Frame::new_bulk_from_slice(cwd.to_str().unwrap().as_bytes()),
+                        ]))
+                        .await?;
                     }
                     b"appendfsync" => {
-                        self.connection
-                            .write_frame(&Frame::Array(vec![
-                                Frame::Bulk(cmd.key),
-                                Frame::new_bulk_from(
-                                    self.config.read().await.aof_fsync.to_string(),
-                                ),
-                            ]))
-                            .await?;
+                        self.write_frame(&Frame::Array(vec![
+                            Frame::Bulk(cmd.key),
+                            Frame::new_bulk_from(config.read().await.aof_fsync.to_string()),
+                        ]))
+                        .await?;
                     }
                     b"save" => {
                         let save_params = self
@@ -405,35 +389,31 @@ impl Client {
                             .collect::<Vec<String>>()
                             .join(" ");
 
-                        self.connection
-                            .write_frame(&Frame::Array(vec![
-                                Frame::Bulk(cmd.key),
-                                Frame::new_bulk_from(save_params),
-                            ]))
-                            .await?;
+                        self.write_frame(&Frame::Array(vec![
+                            Frame::Bulk(cmd.key),
+                            Frame::new_bulk_from(save_params),
+                        ]))
+                        .await?;
                     }
                     b"loglevel" => {
-                        self.connection
-                            .write_frame(&Frame::Array(vec![
-                                Frame::Bulk(cmd.key),
-                                Frame::new_bulk_from(config.read().await.verbosity.to_string()),
-                            ]))
-                            .await?;
+                        self.write_frame(&Frame::Array(vec![
+                            Frame::Bulk(cmd.key),
+                            Frame::new_bulk_from(config.read().await.verbosity.to_string()),
+                        ]))
+                        .await?;
                     }
                     b"bind" => {
-                        self.connection
-                            .write_frame(&Frame::Array(vec![
-                                Frame::Bulk(cmd.key),
-                                Frame::new_bulk_from_slice(config.read().await.bindaddr.as_bytes()),
-                            ]))
-                            .await?;
+                        self.write_frame(&Frame::Array(vec![
+                            Frame::Bulk(cmd.key),
+                            Frame::new_bulk_from_slice(config.read().await.bindaddr.as_bytes()),
+                        ]))
+                        .await?;
                     }
                     _ => {
-                        self.connection
-                            .write_frame(&Frame::Error(Bytes::from_static(
-                                b"ERR no such configuration",
-                            )))
-                            .await?;
+                        self.write_frame(&Frame::Error(Bytes::from_static(
+                            b"ERR no such configuration",
+                        )))
+                        .await?;
                     }
                 }
             }
@@ -441,44 +421,40 @@ impl Client {
                 b"dbfilename" => match String::from_utf8(cmd.value.to_vec()) {
                     Ok(newval) => {
                         self.config.write().await.rdb_filename = newval;
-                        self.connection.write_frame(&shared::ok).await?;
+                        self.write_frame(&shared::ok).await?;
                     }
                     Err(_) => {
-                        self.connection
-                            .write_frame(&Frame::Error(Bytes::from_static(
-                                b"ERR invalid dbfilename",
-                            )))
-                            .await?;
+                        self.write_frame(&Frame::Error(Bytes::from_static(
+                            b"ERR invalid dbfilename",
+                        )))
+                        .await?;
                         return Ok(());
                     }
                 },
                 b"port" => {
                     if let Ok(port) = std::str::from_utf8(&cmd.value).unwrap().parse::<u16>() {
                         self.config.write().await.port = port;
-                        self.connection.write_frame(&shared::ok).await?;
+                        self.write_frame(&shared::ok).await?;
                     } else {
-                        self.connection
-                            .write_frame(&Frame::Error(Bytes::from_static(b"ERR invalid port")))
+                        self.write_frame(&Frame::Error(Bytes::from_static(b"ERR invalid port")))
                             .await?;
                     }
                 }
                 b"databases" => {
                     if let Ok(db_num) = std::str::from_utf8(&cmd.value).unwrap().parse::<usize>() {
                         self.config.write().await.db_num = db_num;
-                        self.connection.write_frame(&shared::ok).await?;
+                        self.write_frame(&shared::ok).await?;
                     } else {
-                        self.connection
-                            .write_frame(&Frame::Error(Bytes::from_static(b"ERR invalid db_num")))
+                        self.write_frame(&Frame::Error(Bytes::from_static(b"ERR invalid db_num")))
                             .await?;
                     }
                 }
                 b"hz" => {
                     if let Ok(hz) = std::str::from_utf8(&cmd.value).unwrap().parse::<usize>() {
                         self.config.write().await.hz = hz;
-                        self.connection.write_frame(&shared::ok).await?;
+                        self.write_frame(&shared::ok).await?;
                     } else {
-                        self.connection
-                            .write_frame(&Frame::Error(Bytes::from_static(b"ERR invalid hz")))
+                        self.write_frame(&Frame::Error(Bytes::from_static(b"ERR invalid hz")))
                             .await?;
                     }
                 }
@@ -487,16 +463,15 @@ impl Client {
                         "on" => AofOption::On,
                         "off" => AofOption::Off,
                         _ => {
-                            self.connection
-                                .write_frame(&Frame::Error(Bytes::from_static(
-                                    b"ERR invalid appendonly",
-                                )))
-                                .await?;
+                            self.write_frame(&Frame::Error(Bytes::from_static(
+                                b"ERR invalid appendonly",
+                            )))
+                            .await?;
                             return Ok(());
                         }
                     };
                     self.config.write().await.aof_state = aof_state;
-                    self.connection.write_frame(&shared::ok).await?;
+                    self.write_frame(&shared::ok).await?;
                 }
                 b"appendfsync" => {
                     let aof_fsync = match std::str::from_utf8(&cmd.value).unwrap() {
@@ -504,16 +479,15 @@ impl Client {
                         "always" => AofFsync::Always,
                         "no" => AofFsync::No,
                         _ => {
-                            self.connection
-                                .write_frame(&Frame::Error(Bytes::from_static(
-                                    b"ERR invalid appendfsync",
-                                )))
-                                .await?;
+                            self.write_frame(&Frame::Error(Bytes::from_static(
+                                b"ERR invalid appendfsync",
+                            )))
+                            .await?;
                             return Ok(());
                         }
                     };
                     self.config.write().await.aof_fsync = aof_fsync;
-                    self.connection.write_frame(&shared::ok).await?;
+                    self.write_frame(&shared::ok).await?;
                 }
                 b"save" => {
                     let save_params = std::str::from_utf8(&cmd.value).unwrap();
@@ -527,16 +501,15 @@ impl Client {
                         })
                         .collect();
                     self.config.write().await.save_params = save_params;
-                    self.connection.write_frame(&shared::ok).await?;
+                    self.write_frame(&shared::ok).await?;
                 }
                 b"dir" => {
                     // chdir
                     let dir = std::str::from_utf8(&cmd.value).unwrap();
                     if let Ok(_) = std::env::set_current_dir(dir) {
-                        self.connection.write_frame(&shared::ok).await?;
+                        self.write_frame(&shared::ok).await?;
                     } else {
-                        self.connection
-                            .write_frame(&Frame::Error(Bytes::from_static(b"ERR invalid dir")))
+                        self.write_frame(&Frame::Error(Bytes::from_static(b"ERR invalid dir")))
                             .await?;
                     }
                 }
@@ -547,34 +520,32 @@ impl Client {
                         "verbose" => Verbosity::Verbose,
                         "debug" => Verbosity::Debug,
                         _ => {
-                            self.connection
-                                .write_frame(&Frame::Error(Bytes::from_static(
-                                    b"ERR invalid loglevel",
-                                )))
-                                .await?;
+                            self.write_frame(&Frame::Error(Bytes::from_static(
+                                b"ERR invalid loglevel",
+                            )))
+                            .await?;
                             return Ok(());
                         }
                     };
                     self.config.write().await.verbosity = verbosity;
-                    self.connection.write_frame(&shared::ok).await?;
+                    self.write_frame(&shared::ok).await?;
                 }
                 _ => {
-                    self.connection
-                        .write_frame(&Frame::Error(Bytes::from_static(
-                            b"ERR no such configuration",
-                        )))
-                        .await?;
+                    self.write_frame(&Frame::Error(Bytes::from_static(
+                        b"ERR no such configuration",
+                    )))
+                    .await?;
                 }
             },
             Command::ConfigResetStat(_) => todo!(),
             Command::ConfigRewrite(_) => todo!(),
 
-            // Publish(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
+            // Publish(cmd) => cmd.apply(self).await?,
             // Subscribe(cmd) => cmd.apply(db, dst, shutdown).await,
             // `Unsubscribe` cannot be applied. It may only be received from the
             // context of a `Subscribe` command.
             // Unsubscribe(_) => Err("`Unsubscribe` is unsupported in this context".into()),
-            Command::Unknown(cmd) => cmd.apply(&self.db, &mut self.connection).await?,
+            Command::Unknown(cmd) => cmd.apply(self).await?,
         };
 
         Ok(())

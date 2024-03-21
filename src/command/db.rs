@@ -1,8 +1,8 @@
 use super::CommandParser;
-use crate::dbms::DatabaseRef;
+use crate::client::Client;
+use crate::frame::Frame;
 use crate::object::RudisObject;
 use crate::shared;
-use crate::{connection::Connection, frame::Frame};
 use bytes::{Bytes, BytesMut};
 use std::io::{Error, ErrorKind, Result};
 
@@ -28,17 +28,17 @@ impl Del {
         Ok(Self { keys })
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
         let mut count = 0;
         {
             for key in self.keys {
-                if db.remove(&key).is_some() {
+                if client.db.remove(&key).is_some() {
                     count += 1;
                 }
             }
         }
 
-        dst.write_frame(&Frame::Integer(count)).await?;
+        client.write_frame(&Frame::Integer(count)).await?;
         Ok(())
     }
 
@@ -66,16 +66,16 @@ impl Exists {
         Ok(Self { key })
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
         let response = {
-            if db.get(&self.key).is_some() {
+            if client.db.get(&self.key).is_some() {
                 Frame::Integer(1)
             } else {
                 Frame::Integer(0)
             }
         };
 
-        dst.write_frame(&response).await?;
+        client.write_frame(&response).await?;
         Ok(())
     }
 }
@@ -107,18 +107,20 @@ impl Keys {
         Ok(Self { pattern })
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
         let allkeys = &self.pattern[..] == b"*";
         let res = {
             Frame::Array(
-                db.iter()
+                client
+                    .db
+                    .iter()
                     .filter(|it| !it.is_expired() && (allkeys || self.pattern == it.key()))
                     .map(|it| Frame::Bulk(it.key().clone()))
                     .collect(),
             )
         };
 
-        dst.write_frame(&res).await?;
+        client.write_frame(&res).await?;
         Ok(())
     }
 }
@@ -145,9 +147,9 @@ impl Type {
         Ok(Self { key })
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
         let response = {
-            if let Some(entry) = db.get(&self.key) {
+            if let Some(entry) = client.db.get(&self.key) {
                 match &entry.value {
                     RudisObject::String(_) => Frame::Simple(Bytes::from_static(b"string")),
                     RudisObject::List(_) => Frame::Simple(Bytes::from_static(b"list")),
@@ -160,7 +162,7 @@ impl Type {
             }
         };
 
-        dst.write_frame(&response).await?;
+        client.write_frame(&response).await?;
         Ok(())
     }
 }
@@ -187,9 +189,9 @@ impl Shutdown {
         Ok(Self { save })
     }
 
-    pub async fn apply(self, _db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
         let response = Frame::Simple(Bytes::from_static(b"OK"));
-        dst.write_frame(&response).await?;
+        client.write_frame(&response).await?;
         // TODO: actually shutdown
         Ok(())
     }
@@ -219,16 +221,16 @@ impl Rename {
         Ok(Self { key, newkey })
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
         let response = {
-            if db.rename(&self.key, self.newkey) {
+            if client.db.rename(&self.key, self.newkey) {
                 Frame::Simple(Bytes::from_static(b"OK"))
             } else {
                 Frame::Error(Bytes::from_static(b"ERR no such key"))
             }
         };
 
-        dst.write_frame(&response).await?;
+        client.write_frame(&response).await?;
         Ok(())
     }
 
@@ -263,16 +265,16 @@ impl Expire {
         1000 * self.seconds + shared::now_ms()
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
         let response = {
-            if db.expire_at(&self.key, self.expire_at_ms()) {
+            if client.db.expire_at(&self.key, self.expire_at_ms()) {
                 Frame::Integer(1)
             } else {
                 Frame::Integer(0)
             }
         };
 
-        dst.write_frame(&response).await?;
+        client.write_frame(&response).await?;
         Ok(())
     }
 
@@ -307,16 +309,16 @@ impl ExpireAt {
         1000 * self.timestamp
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
         let response = {
-            if db.expire_at(&self.key, self.expire_at_ms()) {
+            if client.db.expire_at(&self.key, self.expire_at_ms()) {
                 Frame::Integer(1)
             } else {
                 Frame::Integer(0)
             }
         };
 
-        dst.write_frame(&response).await?;
+        client.write_frame(&response).await?;
         Ok(())
     }
 
@@ -351,16 +353,16 @@ impl PExpire {
         self.milliseconds + shared::now_ms()
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
         let response = {
-            if db.expire_at(&self.key, self.expire_at_ms()) {
+            if client.db.expire_at(&self.key, self.expire_at_ms()) {
                 Frame::Integer(1)
             } else {
                 Frame::Integer(0)
             }
         };
 
-        dst.write_frame(&response).await?;
+        client.write_frame(&response).await?;
         Ok(())
     }
 
@@ -395,16 +397,16 @@ impl PExpireAt {
         self.timestamp
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
         let response = {
-            if db.expire_at(&self.key, self.expire_at_ms()) {
+            if client.db.expire_at(&self.key, self.expire_at_ms()) {
                 Frame::Integer(1)
             } else {
                 Frame::Integer(0)
             }
         };
 
-        dst.write_frame(&response).await?;
+        client.write_frame(&response).await?;
         Ok(())
     }
 

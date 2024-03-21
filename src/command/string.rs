@@ -1,8 +1,9 @@
 use super::CommandParser;
-use crate::dbms::{DatabaseRef, DictValue};
+use crate::client::Client;
+use crate::dbms::DictValue;
+use crate::frame::Frame;
 use crate::object::RudisObject;
 use crate::shared;
-use crate::{connection::Connection, frame::Frame};
 use bytes::{Bytes, BytesMut};
 use dashmap::mapref::entry::Entry;
 use std::io::{Error, ErrorKind, Result};
@@ -20,10 +21,10 @@ impl Get {
         Ok(Self { key })
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
         // Get the value from the shared database state
         let response = {
-            if let Some(entry) = db.get(&self.key) {
+            if let Some(entry) = client.db.get(&self.key) {
                 // If a value is present, it is written to the client in "bulk"
                 // format.
                 entry.value.serialize()
@@ -34,7 +35,7 @@ impl Get {
         };
 
         // Write the response back to the client
-        dst.write_frame(&response).await?;
+        client.write_frame(&response).await?;
 
         Ok(())
     }
@@ -104,11 +105,11 @@ impl Set {
         })
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
-        match db.entry(self.key) {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
+        match client.db.clone().entry(self.key) {
             Entry::Occupied(mut oe) => {
                 if self.flags & REDIS_SET_NX != 0 {
-                    dst.write_frame(&shared::null_bulk).await.unwrap();
+                    client.write_frame(&shared::null_bulk).await.unwrap();
                     return Ok(());
                 }
 
@@ -120,13 +121,13 @@ impl Set {
 
                 drop(oe);
 
-                dst.write_frame(&shared::ok).await.unwrap();
+                client.write_frame(&shared::ok).await.unwrap();
 
                 Ok(())
             }
             Entry::Vacant(ve) => {
                 if self.flags & REDIS_SET_XX != 0 {
-                    dst.write_frame(&shared::null_bulk).await.unwrap();
+                    client.write_frame(&shared::null_bulk).await.unwrap();
                     return Ok(());
                 }
 
@@ -135,7 +136,7 @@ impl Set {
                     self.expire.map(|ms| shared::now_ms() + ms),
                 ));
 
-                dst.write_frame(&shared::ok).await.unwrap();
+                client.write_frame(&shared::ok).await.unwrap();
 
                 Ok(())
             }
@@ -179,11 +180,11 @@ impl Append {
         Ok(Self { key, value })
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
         // Append the value to the shared database state
         let response = {
             // locked write
-            match db.entry(self.key) {
+            match client.db.entry(self.key) {
                 Entry::Occupied(mut oe) => {
                     if let RudisObject::String(s) = &mut oe.get_mut().value {
                         s.extend_from_slice(&self.value);
@@ -205,7 +206,7 @@ impl Append {
         };
 
         // Write the response back to the client
-        dst.write_frame(&response).await?;
+        client.write_frame(&response).await?;
 
         Ok(())
     }
@@ -233,10 +234,10 @@ impl Strlen {
         Ok(Self { key })
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
         // Get the value from the shared database state
         let response = {
-            if let Some(entry) = db.get(&self.key) {
+            if let Some(entry) = client.db.get(&self.key) {
                 if let RudisObject::String(s) = &entry.value {
                     Frame::Integer(s.len() as u64)
                 } else {
@@ -250,7 +251,7 @@ impl Strlen {
         };
 
         // Write the response back to the client
-        dst.write_frame(&response).await?;
+        client.write_frame(&response).await?;
 
         Ok(())
     }

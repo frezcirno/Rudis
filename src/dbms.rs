@@ -78,7 +78,14 @@ impl Dict {
     }
 
     pub fn check_expired(&self, key: &Bytes) {
-        if self.dict.get(key).map(|v| v.is_expired()).unwrap_or(false) {
+        let exist_and_expire = {
+            if let Some(entry) = self.dict.get(key) {
+                entry.is_expired()
+            } else {
+                false
+            }
+        };
+        if exist_and_expire {
             self.dict.remove(key);
         }
     }

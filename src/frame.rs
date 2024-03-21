@@ -82,51 +82,51 @@ impl Frame {
         }
     }
 
-    pub fn parse(src: &mut Cursor<&BytesMut>) -> Result<Option<Frame>> {
-        if !src.has_remaining() {
+    pub fn parse(cur: &mut Cursor<&BytesMut>) -> Result<Option<Frame>> {
+        if !cur.has_remaining() {
             return Ok(None);
         }
 
-        let checkpoint: u64 = src.position();
-        let byte = src.get_u8();
+        let checkpoint: u64 = cur.position();
+        let byte = cur.get_u8();
         match byte {
             b'+' => {
-                if let Some(line) = Self::next_line(src) {
+                if let Some(line) = Self::next_line(cur) {
                     let frame = Frame::Simple(Bytes::copy_from_slice(line));
                     return Ok(Some(frame));
                 }
             }
             b'-' => {
-                if let Some(line) = Self::next_line(src) {
+                if let Some(line) = Self::next_line(cur) {
                     let frame = Frame::Error(Bytes::copy_from_slice(line));
                     return Ok(Some(frame));
                 }
             }
             b':' => {
-                if let Some(n) = Self::parse_into(src)? {
+                if let Some(n) = Self::parse_into(cur)? {
                     let frame = Frame::Integer(n);
                     return Ok(Some(frame));
                 }
             }
             b'$' => {
-                if let Some(len) = Self::parse_into::<i64>(src)? {
+                if let Some(len) = Self::parse_into::<i64>(cur)? {
                     if len == -1 {
                         return Ok(Some(Frame::Null));
                     }
 
-                    if src.remaining() as i64 + 2 > len {
+                    if cur.remaining() as i64 >= len + 2 {
                         // 2 for \r\n
-                        let bulk = Bytes::copy_from_slice(&src.chunk()[..len as usize]);
-                        src.advance(len as usize + 2);
+                        let bulk = Bytes::copy_from_slice(&cur.chunk()[..len as usize]);
+                        cur.advance(len as usize + 2);
                         return Ok(Some(Frame::Bulk(bulk)));
                     }
                 }
             }
             b'*' => {
-                if let Some(len) = Self::parse_into(src)? {
+                if let Some(len) = Self::parse_into(cur)? {
                     let mut array = Vec::with_capacity(len);
                     for _ in 0..len {
-                        if let Some(frame) = Frame::parse(src)? {
+                        if let Some(frame) = Frame::parse(cur)? {
                             array.push(frame);
                         } else {
                             // failed to parse array element
@@ -146,7 +146,7 @@ impl Frame {
         } // match
 
         // data not enough, rollback
-        src.set_position(checkpoint);
+        cur.set_position(checkpoint);
         Ok(None)
     }
 

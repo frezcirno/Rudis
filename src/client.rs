@@ -1,13 +1,13 @@
-use crate::aof::AofOption;
 use crate::command::Command;
 use crate::config::ConfigRef;
 use crate::connection::Connection;
 use crate::dbms::DatabaseRef;
 use crate::server::Server;
 use crate::shared;
+use crate::{aof::AofOption, frame::Frame};
 use std::io::Result;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
@@ -25,10 +25,9 @@ pub struct Client {
     pub config: ConfigRef,
     pub server: Arc<Server>,
     pub db: DatabaseRef,
-    pub connection: Connection,
+    pub connection: Option<Connection>,
     pub address: SocketAddr,
     pub inner: RwLock<ClientInner>,
-    pub quit: AtomicBool,
     pub quit_ch: broadcast::Receiver<()>,
 }
 
@@ -57,19 +56,28 @@ impl Client {
         Ok(())
     }
 
+    pub async fn write_frame(&mut self, frame: &Frame) -> Result<usize> {
+        match self.connection {
+            None => Ok(0), // fake client
+            Some(ref mut connection) => connection.write_frame(frame).await,
+        }
+    }
+
     pub async fn handle_client(&mut self) -> Result<()> {
-        while !self.quit.load(Ordering::Relaxed) {
+        loop {
+            let connection = self.connection.as_mut().unwrap();
+
             let maybe_frame = tokio::select! {
                 _ = self.quit_ch.recv() => {
                     log::debug!("server quit");
                     return Ok(());
                 }
-                maybe_err_frame = self.connection.read_frame() => {
+                maybe_err_frame = connection.read_frame() => {
                     // illegal frame
                     match maybe_err_frame {
                         Ok(f) => f,
                         Err(e) => {
-                            self.connection.write_frame(&shared::protocol_err).await?;
+                            self.write_frame(&shared::protocol_err).await?;
                             log::error!("read frame error: {:?}", e);
                             return Ok(());
                         }
@@ -87,7 +95,7 @@ impl Client {
                 match maybe_cmd {
                     Ok(cmd) => cmd,
                     Err(e) => {
-                        self.connection.write_frame(&shared::syntax_err).await?;
+                        self.write_frame(&shared::syntax_err).await?;
                         log::error!("parse command error: {:?}", e);
                         continue;
                     }
@@ -104,13 +112,11 @@ impl Client {
 
             // TODO: check if the server is loading
 
-            self.execute_cmd(cmd.clone()).await;
+            self.handle_command(cmd.clone()).await;
 
             // propagate
             self.propagate(cmd).await;
         }
-
-        Ok(())
     }
 
     async fn propagate(&mut self, cmd: Command) {

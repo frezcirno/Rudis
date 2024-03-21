@@ -8,7 +8,10 @@ def encode(*args):
     result = ""
     result += f"*{len(args)}\r\n"
     for arg in args:
-        result += f"${len(arg)}\r\n{arg}\r\n"
+        if arg.isdigit():
+            result += f":{arg}\r\n"
+        else:
+            result += f"${len(arg)}\r\n{arg}\r\n"
     return result.encode()
 
 
@@ -45,6 +48,6 @@ while True:
     if cmd == "exit":
         break
     sock.sendall(encode(*cmd.split()))
-    print(decode(sock.recv(4096)))
+    print(decode(sock.recv(4096))[0])
 
 sock.close()

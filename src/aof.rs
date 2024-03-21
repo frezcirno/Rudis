@@ -1,17 +1,23 @@
+use crate::client::{Client, ClientInner};
 use crate::command::Command;
 use crate::config::ConfigRef;
+use crate::frame::Frame;
 use crate::object::{RudisHash, RudisList, RudisObject, RudisSet, RudisString, RudisZSet};
 use crate::server::Server;
 use crate::shared;
 use bytes::{Buf, Bytes, BytesMut};
 use libc::pid_t;
 use std::fmt::Display;
-use std::io::Result;
 use std::io::Write;
+use std::io::{Cursor, Result};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::RwLock;
+use tokio::sync::RwLockWriteGuard;
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum AofOption {
@@ -328,9 +334,10 @@ impl Server {
         Ok(())
     }
 
-    pub async fn rewrite_append_only_file_background(&self) -> Result<()> {
-        let mut aof_state = self.aof_state.write().await;
-
+    pub async fn rewrite_append_only_file_background(
+        &self,
+        aof_state: &mut RwLockWriteGuard<'_, AofState>,
+    ) -> Result<()> {
         if aof_state.aof_child_pid.is_some() {
             return Ok(());
         }
@@ -347,12 +354,19 @@ impl Server {
 
                 // close listener
                 unsafe {
-                    libc::close(self.listener_fd.read().await.unwrap());
+                    libc::close(self.listener_fd.load(Ordering::Relaxed));
                 }
 
                 let aof_bg_filename = format!("temp-rewriteaof-bg-{}.aof", shared::get_pid());
-                self.rewrite_append_only_file(&aof_bg_filename);
-                std::process::exit(0);
+                match self.rewrite_append_only_file(&aof_bg_filename) {
+                    Ok(_) => {
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        log::error!("Error rewriting append only file: {:?}", e);
+                        std::process::exit(1);
+                    }
+                }
             }
             child => {
                 // parent
@@ -402,6 +416,7 @@ impl Server {
             Command::HGet(_cmd) => {}
             Command::SAdd(cmd) => buf.extend_from_slice(&cmd.rewrite()),
             Command::SRem(cmd) => buf.extend_from_slice(&cmd.rewrite()),
+            Command::Type(_cmd) => {}
             Command::Save(_cmd) => {}
             Command::BgSave(_cmd) => {}
             Command::BgRewriteAof(_cmd) => {}
@@ -440,7 +455,8 @@ impl Server {
                 .await?,
         );
 
-        self.rewrite_append_only_file_background().await?;
+        self.rewrite_append_only_file_background(&mut aof_state)
+            .await?;
 
         self.config.write().await.aof_state = AofOption::WaitRewrite;
 
@@ -453,12 +469,12 @@ impl Server {
 
         aof_state.aof_file = None;
     }
-}
 
-impl Server {
-    pub async fn background_rewrite_done_handler(&self) -> Result<()> {
+    pub async fn background_rewrite_done_handler(
+        &self,
+        aof_state: &mut RwLockWriteGuard<'_, AofState>,
+    ) -> Result<()> {
         log::info!("Background AOF rewrite terminated with success");
-        let mut aof_state = self.aof_state.write().await;
 
         // append new data generated during the rewrite
         let aof_bg_filename = format!("temp-rewriteaof-bg-{}.aof", shared::get_pid());
@@ -505,6 +521,65 @@ impl Server {
         if self.config.read().await.aof_state == AofOption::WaitRewrite {
             aof_state.aof_rewrite_scheduled = true;
         }
+
+        Ok(())
+    }
+
+    pub async fn load_append_only_file(self: &Arc<Self>) -> Result<()> {
+        let old_aof_state = {
+            let mut config = self.config.write().await;
+            let state = config.aof_state;
+            config.aof_state = AofOption::Off;
+            state
+        };
+
+        {
+            let mut fake_client = Client {
+                config: self.config.clone(),
+                server: self.clone(),
+                db: self.get(0),
+                connection: None,
+                address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
+                inner: RwLock::new(ClientInner {
+                    name: String::new(),
+                    last_interaction: 0,
+                    flags: Default::default(),
+                }),
+                quit_ch: self.quit_ch.subscribe(),
+            };
+
+            let mut reader = tokio::io::BufReader::new(
+                OpenOptions::new()
+                    .read(true)
+                    .open(&self.config.read().await.aof_filename)
+                    .await?,
+            );
+            let mut buffer = BytesMut::new();
+
+            loop {
+                let mut cur = Cursor::new(&buffer);
+                if let Some(frame) = Frame::parse(&mut cur)? {
+                    // if a frame is parsed successfully, advance the buffer
+                    buffer.advance(cur.position() as usize);
+
+                    // handle the command
+                    let cmd = Command::from(frame)?;
+                    fake_client.handle_command(cmd).await?;
+                } else {
+                    // no enough data, need to read more
+                    let n_read = reader.read_buf(&mut buffer).await?;
+                    if n_read == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        self.config.write().await.aof_state = old_aof_state;
+
+        let mut aof_state = self.aof_state.write().await;
+        aof_state.update_current_size().await;
+        aof_state.aof_rewrite_base_size = aof_state.aof_current_size;
 
         Ok(())
     }

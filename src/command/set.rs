@@ -1,8 +1,9 @@
 use super::CommandParser;
-use crate::dbms::{DatabaseRef, DictValue};
+use crate::client::Client;
+use crate::dbms::DictValue;
+use crate::frame::Frame;
 use crate::object::RudisObject;
 use crate::shared;
-use crate::{connection::Connection, frame::Frame};
 use bytes::{Bytes, BytesMut};
 use dashmap::mapref::entry::Entry;
 use std::collections::HashSet;
@@ -26,8 +27,8 @@ impl SAdd {
         Ok(Self { key, members })
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
-        match db.entry(self.key) {
+    pub async fn apply(self, dst: &mut Client) -> Result<()> {
+        match dst.db.clone().entry(self.key) {
             Entry::Occupied(mut oe) => match &mut oe.get_mut().value {
                 RudisObject::Set(s) => {
                     let mut added = 0;
@@ -93,8 +94,8 @@ impl SRem {
         Ok(Self { key, members })
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
-        match db.get_mut(&self.key) {
+    pub async fn apply(self, dst: &mut Client) -> Result<()> {
+        match dst.db.clone().get_mut(&self.key) {
             Some(mut entry) => match &mut entry.value {
                 RudisObject::Set(s) => {
                     let mut removed = 0;

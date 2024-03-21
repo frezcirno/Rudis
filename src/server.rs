@@ -3,16 +3,16 @@ use crate::client::{Client, ClientInner};
 use crate::config::ConfigRef;
 use crate::connection::Connection;
 use crate::dbms::DatabaseRef;
-use crate::rdb::RdbState;
+use crate::rdb::{Rdb, RdbState};
 use crate::shared;
 use log;
 use std::io::{Error, ErrorKind, Result};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::fs::OpenOptions;
+use tokio::fs::{File, OpenOptions};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, RwLock};
 use tokio::time::sleep;
@@ -29,13 +29,13 @@ pub struct Server {
     pub rdb_state: RwLock<RdbState>,
     pub aof_state: RwLock<AofState>,
     pub inner: RwLock<RudisServerInner>,
-    pub listener_fd: RwLock<Option<i32>>,
+    pub listener_fd: AtomicI32,
     pub quit_ch: broadcast::Sender<()>,
 }
 
 impl Server {
     pub async fn from_config(config: ConfigRef) -> Arc<Server> {
-        let mut server = Server {
+        let server = Arc::new(Server {
             config,
 
             dbs: DatabaseRef::new(),
@@ -49,13 +49,37 @@ impl Server {
             inner: RwLock::new(RudisServerInner {
                 runid: shared::gen_runid(),
             }),
-            listener_fd: RwLock::new(None),
+            listener_fd: AtomicI32::new(-1),
             quit_ch: broadcast::channel(1).0,
-        };
+        });
+
+        server.init().await.unwrap();
 
         server.load_data_from_disk().await;
 
-        Arc::new(server)
+        server
+    }
+
+    async fn init(self: &Arc<Self>) -> Result<()> {
+        // handle aof
+        if self.config.read().await.aof_state == AofOption::On {
+            let mut aof_state = self.aof_state.write().await;
+            aof_state.aof_file = Some(
+                OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .create(true)
+                    .open(&self.config.read().await.aof_filename)
+                    .await?,
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn get(&self, _index: usize) -> DatabaseRef {
+        // self.inner[index].clone()
+        self.dbs.clone()
     }
 
     pub async fn start(self: &Arc<Self>) -> Result<()> {
@@ -112,20 +136,8 @@ impl Server {
         let port = self.config.read().await.port;
         log::info!("Listening on {}:{}", host, port);
         let listener = TcpListener::bind(SocketAddr::new(std::net::IpAddr::V4(host), port)).await?;
-        *self.listener_fd.write().await = Some(listener.as_raw_fd());
-
-        // handle aof
-        if self.config.read().await.aof_state == AofOption::On {
-            let mut aof_state = self.aof_state.write().await;
-            aof_state.aof_file = Some(
-                OpenOptions::new()
-                    .write(true)
-                    .append(true)
-                    .create(true)
-                    .open(&self.config.read().await.aof_filename)
-                    .await?,
-            );
-        }
+        self.listener_fd
+            .store(listener.as_raw_fd(), Ordering::Relaxed);
 
         // main loop
         let mut quit_ch = self.quit_ch.subscribe();
@@ -141,14 +153,13 @@ impl Server {
                             config: self.config.clone(),
                             server: self.clone(),
                             db: self.get(0),
-                            connection: Connection::from(connection),
+                            connection: Some(Connection::from(connection)),
                             address,
                             inner: RwLock::new(ClientInner {
                                 name: String::new(),
                                 last_interaction: 0,
                                 flags: Default::default(),
                             }),
-                            quit: false.into(),
                             quit_ch: self.quit_ch.subscribe(),
                         };
                         tokio::spawn(async move {
@@ -222,13 +233,14 @@ impl Server {
         self.databases_cron(cronloops).await;
 
         {
-            let rdb_state = self.rdb_state.read().await;
+            let mut rdb_state = self.rdb_state.write().await;
             let mut aof_state = self.aof_state.write().await;
 
             if rdb_state.rdb_child_pid.is_none() && aof_state.aof_child_pid.is_none() {
                 if aof_state.aof_rewrite_scheduled {
                     // schedule an AOF rewrite
-                    self.rewrite_append_only_file_background().await;
+                    self.rewrite_append_only_file_background(&mut aof_state)
+                        .await;
                 }
             }
 
@@ -240,9 +252,9 @@ impl Server {
                     log::info!("Process {} terminated with status {}", pid, status);
 
                     if Some(pid) == rdb_state.rdb_child_pid {
-                        self.background_save_done_handler().await;
+                        self.background_save_done_handler(&mut rdb_state);
                     } else if Some(pid) == aof_state.aof_child_pid {
-                        self.background_rewrite_done_handler().await;
+                        self.background_rewrite_done_handler(&mut aof_state).await;
                     } else {
                         log::warn!("Unrecognized child pid: {}", pid);
                     }
@@ -250,7 +262,8 @@ impl Server {
             } else {
                 // no background process is running,
                 // check if we need to start a background save
-                if self.should_save().await {
+                if self.should_save(&rdb_state).await {
+                    log::info!("Starting automatic RDB save");
                     self.background_save().await;
                 }
 
@@ -270,7 +283,8 @@ impl Server {
                         growth,
                         base
                     );
-                        self.rewrite_append_only_file_background().await;
+                        self.rewrite_append_only_file_background(&mut aof_state)
+                            .await;
                     }
                 }
             }
@@ -295,5 +309,34 @@ impl Server {
 
     fn would_block(err: &Error) -> bool {
         err.kind() == ErrorKind::WouldBlock
+    }
+
+    async fn load_data_from_disk(self: &Arc<Self>) -> Result<()> {
+        if self.config.read().await.aof_state == AofOption::On {
+            log::info!("Loading DB from AOF");
+            match self.load_append_only_file().await {
+                Ok(()) => log::info!("DB loaded from AOF"),
+                Err(e) => log::error!("Error loading DB from AOF: {:?}", e),
+            }
+        } else {
+            log::info!("Loading DB from disk");
+            match File::open(&self.config.clone().read().await.rdb_filename).await {
+                Ok(mut file) => {
+                    let mut rdb = Rdb::load_file(&mut file).await?;
+                    match self.rdb_load(&mut rdb).await {
+                        Ok(()) => log::info!("DB loaded from disk"),
+                        Err(e) => log::error!("Error loading DB from disk: {:?}", e),
+                    }
+                }
+                Err(err) => {
+                    if err.kind() != ErrorKind::NotFound {
+                        log::error!("Error loading DB from disk: {:?}", err);
+                        panic!("Error loading DB from disk: {:?}", err);
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }

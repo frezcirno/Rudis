@@ -1,8 +1,9 @@
 use super::CommandParser;
-use crate::dbms::{DatabaseRef, DictValue};
+use crate::client::Client;
+use crate::dbms::DictValue;
+use crate::frame::Frame;
 use crate::object::{RudisList, RudisObject};
 use crate::shared;
-use crate::{connection::Connection, frame::Frame};
 use bytes::{Bytes, BytesMut};
 use dashmap::mapref::entry::Entry;
 use std::io::{Error, ErrorKind, Result};
@@ -42,16 +43,16 @@ impl ListPush {
         }
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
-        match db.entry(self.key) {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
+        match client.db.clone().entry(self.key) {
             Entry::Occupied(mut x) => match &mut x.get_mut().value {
                 RudisObject::List(l) => {
                     Self::extend(l, self.values, self.left);
-                    dst.write_frame(&Frame::Integer(l.len() as u64)).await?;
+                    client.write_frame(&Frame::Integer(l.len() as u64)).await?;
                     Ok(())
                 }
                 _ => {
-                    dst.write_frame(&shared::wrong_type_err).await?;
+                    client.write_frame(&shared::wrong_type_err).await?;
                     return Err(Error::new(
                         ErrorKind::InvalidInput,
                         "WRONGTYPE Operation against a key holding the wrong kind of value",
@@ -63,7 +64,7 @@ impl ListPush {
                 Self::extend(&mut l, self.values, self.left);
                 let len = l.len();
                 ve.insert(DictValue::new(RudisObject::List(l), None));
-                dst.write_frame(&Frame::Integer(len as u64)).await?;
+                client.write_frame(&Frame::Integer(len as u64)).await?;
                 Ok(())
             }
         }
@@ -107,8 +108,9 @@ impl ListPop {
         Ok(Self { key, left })
     }
 
-    pub async fn apply(self, db: &DatabaseRef, dst: &mut Connection) -> Result<()> {
-        match db.get_mut(&self.key) {
+    pub async fn apply(self, client: &mut Client) -> Result<()> {
+        let db = client.db.clone();
+        let x = match db.get_mut(&self.key) {
             Some(mut entry) => match &mut entry.value {
                 RudisObject::List(l) => {
                     let response = if self.left {
@@ -120,15 +122,16 @@ impl ListPop {
                         db.remove(&self.key);
                     }
                     if let Some(value) = response {
-                        dst.write_frame(&Frame::new_bulk_from(value).sealed()?)
+                        client
+                            .write_frame(&Frame::new_bulk_from(value).sealed()?)
                             .await?;
                     } else {
-                        dst.write_frame(&Frame::Null).await?;
+                        client.write_frame(&Frame::Null).await?;
                     }
                     Ok(())
                 }
                 _ => {
-                    dst.write_frame(&shared::wrong_type_err).await?;
+                    client.write_frame(&shared::wrong_type_err).await?;
                     return Err(Error::new(
                         ErrorKind::InvalidInput,
                         "WRONGTYPE Operation against a key holding the wrong kind of value",
@@ -136,10 +139,11 @@ impl ListPop {
                 }
             },
             None => {
-                dst.write_frame(&Frame::Null).await?;
+                client.write_frame(&Frame::Null).await?;
                 Ok(())
             }
-        }
+        };
+        x
     }
 
     pub fn rewrite(&self) -> BytesMut {

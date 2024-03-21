@@ -44,10 +44,7 @@ impl Connection {
                 return Err(Error::new(ErrorKind::Other, "frame is too large"));
             }
 
-            self.buffer.reserve(max_read);
-            unsafe { self.buffer.set_len(len + max_read) };
-            let n_read = self.stream.read(&mut self.buffer[len..]).await?;
-            unsafe { self.buffer.set_len(len + n_read) };
+            let n_read = self.stream.read_buf(&mut self.buffer).await?;
             if n_read == 0 {
                 // no left data, connection closed
                 if self.buffer.is_empty() {
@@ -61,11 +58,10 @@ impl Connection {
     }
 
     async fn parse_frame(&mut self) -> Result<Option<Frame>> {
-        let mut buf = Cursor::new(&self.buffer);
-        if let Some(frame) = Frame::parse(&mut buf)? {
+        let mut cur = Cursor::new(&self.buffer);
+        if let Some(frame) = Frame::parse(&mut cur)? {
             // if a frame is parsed successfully, advance the buffer
-            let len = buf.position() as usize;
-            self.buffer.advance(len);
+            self.buffer.advance(cur.position() as usize);
             return Ok(Some(frame));
         }
         Ok(None)
