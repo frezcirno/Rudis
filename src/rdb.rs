@@ -1,16 +1,17 @@
+use crate::aof::AofOption;
+use crate::dbms::DatabaseRef;
+use crate::object::RudisObject;
+use crate::server::Server;
+use crate::shared;
 use bytes::{Bytes, BytesMut};
+use libc::pid_t;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Display;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-use crate::dbms::DatabaseManager;
-use crate::object::RudisObject;
-use crate::server::Server;
-use crate::shared;
 
 const REDIS_RDB_TYPE_STRING: u8 = 0;
 const REDIS_RDB_TYPE_LIST: u8 = 1;
@@ -41,6 +42,27 @@ pub struct AutoSave {
 impl Display for AutoSave {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} {}", self.seconds, self.changes)
+    }
+}
+
+#[derive(Debug)]
+pub struct RdbState {
+    pub last_save_time: u64,
+    pub dirty: u64,
+    pub dirty_before_bgsave: u64,
+    pub save_params: Vec<AutoSave>,
+    pub rdb_child_pid: Option<pid_t>,
+}
+
+impl RdbState {
+    pub fn new() -> RdbState {
+        RdbState {
+            last_save_time: 0,
+            dirty: 0,
+            dirty_before_bgsave: 0,
+            save_params: vec![],
+            rdb_child_pid: None,
+        }
     }
 }
 
@@ -211,7 +233,7 @@ impl DerefMut for Rdb {
     }
 }
 
-impl DatabaseManager {
+impl Server {
     pub async fn save(&self, rdb: &mut Rdb) -> Result<()> {
         let now = shared::now_ms();
 
@@ -240,6 +262,29 @@ impl DatabaseManager {
         // flush
         rdb.flush().await?;
         rdb.sync_all().await?;
+
+        Ok(())
+    }
+
+    pub async fn background_save(&self) -> Result<()> {
+        let rdb_filename = self.config.read().await.rdb_filename.clone();
+        match unsafe { libc::fork() } {
+            -1 => {
+                return Err(Error::last_os_error());
+            }
+            0 => {
+                // child process
+                let mut rdb = Rdb {
+                    file: File::create(rdb_filename).await.unwrap(),
+                };
+                self.save(&mut rdb).await.unwrap();
+                std::process::exit(0);
+            }
+            child => {
+                // parent process
+                self.rdb_state.write().await.rdb_child_pid = Some(child);
+            }
+        }
 
         Ok(())
     }
@@ -308,9 +353,49 @@ impl DatabaseManager {
 }
 
 impl Server {
-    pub async fn background_save_done(self: &Arc<Self>, dbs: &mut DatabaseManager) {
+    pub async fn background_save_done_handler(&self) {
         log::info!("Background save done");
 
-        dbs.rdb_save_task = None;
+        self.rdb_state.write().await.rdb_child_pid = None;
+    }
+}
+
+impl Server {
+    // pub fn len(&self) -> usize {
+    //     self.inner.len()
+    // }
+
+    pub fn get(&self, _index: usize) -> DatabaseRef {
+        // self.inner[index].clone()
+        self.dbs.clone()
+    }
+
+    pub async fn load_data_from_disk(&mut self) {
+        if self.config.read().await.aof_state == AofOption::On {
+            // TODO
+        } else {
+            match File::open(&self.config.clone().read().await.rdb_filename).await {
+                Ok(file) => match self.load(&mut Rdb::from_file(file)).await {
+                    Ok(()) => log::info!("DB loaded from disk"),
+                    Err(e) => log::error!("Error loading DB from disk: {:?}", e),
+                },
+                Err(err) => {
+                    if err.kind() != ErrorKind::NotFound {
+                        log::error!("Error loading DB from disk: {:?}", err);
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn should_save(&self) -> bool {
+        let rdb_state = self.rdb_state.read().await;
+        let time_to_last_save = self.clock_ms.load(Ordering::Relaxed) - rdb_state.last_save_time;
+        for saveparam in &self.config.read().await.save_params {
+            if rdb_state.dirty >= saveparam.changes && time_to_last_save >= saveparam.seconds {
+                return true;
+            }
+        }
+        false
     }
 }

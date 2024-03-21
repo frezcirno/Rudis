@@ -8,7 +8,7 @@ mod rdb;
 mod set;
 mod string;
 mod unknown;
-use crate::aof::{AofFsync, AofState};
+use crate::aof::{AofFsync, AofOption};
 use crate::client::Client;
 use crate::config::Verbosity;
 use crate::frame::Frame;
@@ -231,7 +231,7 @@ impl Client {
                 // continue;
             }
             Command::Save(_) => {
-                if self.dbms.rdb_save_task.is_some() {
+                if self.server.rdb_state.read().await.rdb_child_pid.is_some() {
                     self.connection
                         .write_frame(&Frame::Error(Bytes::from_static(
                             b"ERR background save is running",
@@ -239,15 +239,14 @@ impl Client {
                         .await?;
                     return Ok(());
                 }
-
                 let config = self.config.clone();
                 let file = File::create(&config.read().await.rdb_filename).await?;
                 let mut rdb = Rdb::from_file(file);
-                self.dbms.save(&mut rdb).await?;
+                self.server.save(&mut rdb).await?;
                 self.connection.write_frame(&shared::ok).await?;
             }
             Command::BgSave(_) => {
-                if self.dbms.rdb_save_task.is_some() {
+                if self.server.rdb_state.read().await.rdb_child_pid.is_some() {
                     self.connection
                         .write_frame(&Frame::Error(Bytes::from_static(
                             b"ERR background save is running",
@@ -255,39 +254,45 @@ impl Client {
                         .await?;
                     return Ok(());
                 }
-                let config = self.config.clone();
-                let file = File::create(&config.read().await.rdb_filename).await?;
-                let mut rdb = Rdb::from_file(file);
-                let dbms = self.dbms.clone();
-                self.dbms.rdb_save_task = Some(tokio::spawn(async move {
-                    dbms.save(&mut rdb).await.unwrap();
-                }));
+                self.server.background_save().await?;
                 self.connection.write_frame(&shared::ok).await?;
             }
             Command::BgRewriteAof(_) => {
-                if self.dbms.aof_rewrite_task.is_some() {
+                if self
+                    .server
+                    .aof_state
+                    .read()
+                    .await
+                    .aof_child_pid
+                    .is_some()
+                {
+                    // aof rewrite is running
                     self.connection
                         .write_frame(&Frame::Error(Bytes::from_static(
                             b"ERR background rewrite is running",
                         )))
                         .await?;
-                } else if self.dbms.rdb_save_task.is_some() {
-                    self.dbms.aof_rewrite_scheduled = true;
+                } else if self.server.rdb_state.read().await.rdb_child_pid.is_some() {
+                    // rdb save is running: schedule aof rewrite
+                    self.server.aof_state.write().await.aof_rewrite_scheduled = true;
                     self.connection
                         .write_frame(&Frame::Simple(Bytes::from_static(b"BgAofRewrite schduled")))
                         .await?;
                 } else if self
-                    .dbms
+                    .server
+                    // start aof rewrite in background
                     .rewrite_append_only_file_background()
                     .await
                     .is_err()
                 {
+                    // start aof rewrite failed
                     self.connection
                         .write_frame(&Frame::Error(Bytes::from_static(
                             b"ERR background rewrite error",
                         )))
                         .await?;
                 } else {
+                    // start aof rewrite success
                     self.connection.write_frame(&shared::ok).await?;
                 }
             }
@@ -479,8 +484,8 @@ impl Client {
                 }
                 b"appendonly" => {
                     let aof_state = match std::str::from_utf8(&cmd.value).unwrap() {
-                        "on" => AofState::On,
-                        "off" => AofState::Off,
+                        "on" => AofOption::On,
+                        "off" => AofOption::Off,
                         _ => {
                             self.connection
                                 .write_frame(&Frame::Error(Bytes::from_static(

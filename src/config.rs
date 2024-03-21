@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::{fmt::Display, ops::Deref};
 
 use crate::{
-    aof::{AofFsync, AofState},
+    aof::{AofFsync, AofOption},
     rdb::AutoSave,
 };
 use tokio::sync::RwLock;
@@ -57,7 +57,7 @@ pub struct Config {
     pub verbosity: Verbosity,
     pub save_params: Vec<AutoSave>,
     pub rdb_filename: String,
-    pub aof_state: AofState,
+    pub aof_state: AofOption,
     pub aof_fsync: AofFsync,
     pub aof_filename: String,
 }
@@ -68,7 +68,7 @@ impl Default for Config {
             bindaddr: "0.0.0.0".to_owned(),
             port: 6379,
             rdb_filename: "dump.rdb".to_owned(),
-            aof_state: AofState::Off,
+            aof_state: AofOption::Off,
             aof_fsync: AofFsync::Everysec,
             aof_filename: "appendonly.aof".to_owned(),
             db_num: 16,
@@ -123,8 +123,8 @@ impl Config {
             _ => panic!(),
         };
         let aof_state = match table.get("appendonly").unwrap().as_str().unwrap() {
-            "yes" => AofState::On,
-            "no" => AofState::Off,
+            "yes" => AofOption::On,
+            "no" => AofOption::Off,
             _ => panic!(),
         };
         let aof_fsync = match table.get("appendfsync").unwrap().as_str().unwrap() {

@@ -12,27 +12,49 @@ pub struct Connection {
     pub buffer: BytesMut,
 }
 
+const BUFFER_SIZE: usize = 16 * 1024;
+
 impl Connection {
     pub fn from(stream: TcpStream) -> Connection {
         Connection {
             stream,
-            buffer: BytesMut::zeroed(16 * 1024),
+            buffer: BytesMut::with_capacity(BUFFER_SIZE),
         }
     }
 
     // read a frame from the connection
     pub async fn read_frame(&mut self) -> Result<Option<Frame>> {
         loop {
+            // log::debug!(
+            //     "buffer cap = {}, len = {}, content = {:?}",
+            //     self.buffer.capacity(),
+            //     self.buffer.len(),
+            //     &self.buffer
+            // );
+
             if let Some(frame) = self.parse_frame().await? {
                 return Ok(Some(frame));
             }
 
             // no enough data, need to read more
-            if self.stream.read(&mut self.buffer).await? == 0 {
+            // ensure the buffer has enough capacity
+            let len = self.buffer.len();
+            let max_read = BUFFER_SIZE - len;
+            if max_read == 0 {
+                return Err(Error::new(ErrorKind::Other, "frame is too large"));
+            }
+
+            self.buffer.reserve(max_read);
+            unsafe { self.buffer.set_len(len + max_read) };
+            let n_read = self.stream.read(&mut self.buffer[len..]).await?;
+            unsafe { self.buffer.set_len(len + n_read) };
+            if n_read == 0 {
+                // no left data, connection closed
                 if self.buffer.is_empty() {
+                    log::debug!("connection closed");
                     return Ok(None);
                 }
-                // Oops, connection close by peer
+                // connection reset by peer
                 return Err(Error::new(ErrorKind::Other, "connection reset by peer"));
             }
         }

@@ -112,7 +112,7 @@ impl Keys {
         let res = {
             Frame::Array(
                 db.iter()
-                    .filter(|it| allkeys || self.pattern == it.key())
+                    .filter(|it| !it.is_expired() && (allkeys || self.pattern == it.key()))
                     .map(|it| Frame::Bulk(it.key().clone()))
                     .collect(),
             )

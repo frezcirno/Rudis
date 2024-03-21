@@ -26,10 +26,6 @@ impl Frame {
         Frame::Bulk(Bytes::copy_from_slice(s.into()))
     }
 
-    // pub fn new_bulk_from_bytes(s: Bytes) -> Frame {
-    //     Frame::Bulk(s)
-    // }
-
     pub fn new_integer_from(i: u64) -> Frame {
         Frame::Integer(i)
     }
@@ -118,10 +114,10 @@ impl Frame {
                         return Ok(Some(Frame::Null));
                     }
 
-                    if src.remaining() as i64 > len {
+                    if src.remaining() as i64 + 2 > len {
+                        // 2 for \r\n
                         let bulk = Bytes::copy_from_slice(&src.chunk()[..len as usize]);
-                        src.advance(len as usize);
-
+                        src.advance(len as usize + 2);
                         return Ok(Some(Frame::Bulk(bulk)));
                     }
                 }
@@ -145,25 +141,7 @@ impl Frame {
                 }
             }
             _ => {
-                // maybe inline command "cmd arg1 arg2 ...\r\n"
-                // unget last byte
-                src.set_position(checkpoint);
-
-                // parse each into array
-                if let Some(line) = Self::next_line(src) {
-                    return Ok(Some(Frame::Array(
-                        line.split(|&b| b == b' ')
-                            .map(|s| {
-                                if let Ok(s) = std::str::from_utf8(s) {
-                                    if let Ok(n) = u64::from_str(s) {
-                                        return Frame::Integer(n as u64);
-                                    }
-                                }
-                                Frame::Bulk(Bytes::copy_from_slice(s))
-                            })
-                            .collect(),
-                    )));
-                }
+                return Err(Error::new(ErrorKind::InvalidInput, "illegal frame"));
             }
         } // match
 

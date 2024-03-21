@@ -1,12 +1,14 @@
-use crate::aof::AofState;
+use crate::aof::AofOption;
 use crate::command::Command;
 use crate::config::ConfigRef;
 use crate::connection::Connection;
-use crate::dbms::{DatabaseManager, DatabaseRef};
+use crate::dbms::DatabaseRef;
+use crate::server::Server;
 use crate::shared;
 use std::io::Result;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
 const REDIS_MULTI: u32 = 1 << 3;
@@ -21,7 +23,7 @@ pub struct ClientInner {
 
 pub struct Client {
     pub config: ConfigRef,
-    pub dbms: DatabaseManager,
+    pub server: Arc<Server>,
     pub db: DatabaseRef,
     pub connection: Connection,
     pub address: SocketAddr,
@@ -51,13 +53,17 @@ impl Client {
                 "invalid db index",
             ));
         }
-        self.db = self.dbms.get(0);
+        self.db = self.server.get(0);
         Ok(())
     }
 
     pub async fn handle_client(&mut self) -> Result<()> {
         while !self.quit.load(Ordering::Relaxed) {
             let maybe_frame = tokio::select! {
+                _ = self.quit_ch.recv() => {
+                    log::debug!("server quit");
+                    return Ok(());
+                }
                 maybe_err_frame = self.connection.read_frame() => {
                     // illegal frame
                     match maybe_err_frame {
@@ -68,11 +74,7 @@ impl Client {
                             return Ok(());
                         }
                     }
-                },
-                _ = self.quit_ch.recv() => {
-                    log::debug!("server quit");
-                    return Ok(());
-                },
+                }
             };
             let frame = match maybe_frame {
                 Some(frame) => frame,
@@ -112,8 +114,8 @@ impl Client {
     }
 
     async fn propagate(&mut self, cmd: Command) {
-        if self.config.read().await.aof_state != AofState::On {
-            self.dbms.feed_append_only_file(cmd, self.db.index).await;
+        if self.config.read().await.aof_state != AofOption::Off {
+            self.server.feed_append_only_file(cmd, self.db.index).await;
         }
     }
 }
