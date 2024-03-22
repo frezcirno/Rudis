@@ -48,7 +48,7 @@ impl ListPush {
             Entry::Occupied(mut x) => match &mut x.get_mut().value {
                 RudisObject::List(l) => {
                     Self::extend(l, self.values, self.left);
-                    client.write_frame(&Frame::Integer(l.len() as u64)).await?;
+                    client.write_frame(&Frame::Integer(l.len() as i64)).await?;
                     Ok(())
                 }
                 _ => {
@@ -64,7 +64,7 @@ impl ListPush {
                 Self::extend(&mut l, self.values, self.left);
                 let len = l.len();
                 ve.insert(DictValue::new(RudisObject::List(l), None));
-                client.write_frame(&Frame::Integer(len as u64)).await?;
+                client.write_frame(&Frame::Integer(len as i64)).await?;
                 Ok(())
             }
         }

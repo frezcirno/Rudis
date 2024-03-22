@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
+use tokio::sync::RwLockWriteGuard;
 
 const REDIS_RDB_TYPE_STRING: u8 = 0;
 const REDIS_RDB_TYPE_LIST: u8 = 1;

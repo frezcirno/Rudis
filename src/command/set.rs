@@ -37,8 +37,7 @@ impl SAdd {
                             added += 1;
                         }
                     }
-                    dst.write_frame(&Frame::new_integer_from(added as u64))
-                        .await?;
+                    dst.write_frame(&Frame::new_integer_from(added)).await?;
                     Ok(())
                 }
                 _ => {
@@ -51,13 +50,12 @@ impl SAdd {
             },
             Entry::Vacant(ve) => {
                 let mut s = HashSet::new();
-                let len = self.members.len();
+                let len = self.members.len() as i64;
                 for member in self.members {
                     s.insert(member);
                 }
                 ve.insert(DictValue::new(RudisObject::new_set_from(s), None));
-                dst.write_frame(&Frame::new_integer_from(len as u64))
-                    .await?;
+                dst.write_frame(&Frame::new_integer_from(len)).await?;
                 Ok(())
             }
         }
@@ -104,7 +102,7 @@ impl SRem {
                             removed += 1;
                         }
                     }
-                    dst.write_frame(&Frame::Integer(removed as u64)).await?;
+                    dst.write_frame(&Frame::Integer(removed)).await?;
                     Ok(())
                 }
                 _ => {

@@ -392,11 +392,17 @@ impl Server {
 
         match cmd {
             Command::Ping(_cmd) => {}
+            Command::Echo(_cmd) => {}
             Command::Quit(_cmd) => {}
             Command::Get(_cmd) => {}
             Command::Set(cmd) => buf.extend_from_slice(&cmd.rewrite()),
+            Command::SetNx(cmd) => buf.extend_from_slice(&cmd.rewrite()),
             Command::Append(cmd) => buf.extend_from_slice(&cmd.rewrite()),
             Command::Strlen(_cmd) => {}
+            Command::Incr(cmd) => buf.extend_from_slice(&cmd.rewrite()),
+            Command::IncrBy(cmd) => buf.extend_from_slice(&cmd.rewrite()),
+            Command::Decr(cmd) => buf.extend_from_slice(&cmd.rewrite()),
+            Command::DecrBy(cmd) => buf.extend_from_slice(&cmd.rewrite()),
             Command::Del(cmd) => buf.extend_from_slice(&cmd.rewrite()),
             Command::Exists(_cmd) => {}
             Command::Select(_cmd) => {}
@@ -476,8 +482,11 @@ impl Server {
     ) -> Result<()> {
         log::info!("Background AOF rewrite terminated with success");
 
-        // append new data generated during the rewrite
-        let aof_bg_filename = format!("temp-rewriteaof-bg-{}.aof", shared::get_pid());
+        // append new data generated during the rewrite to result file
+        let aof_bg_filename = format!(
+            "temp-rewriteaof-bg-{}.aof",
+            aof_state.aof_child_pid.unwrap()
+        );
         let mut file = OpenOptions::new()
             .write(true)
             .append(true)

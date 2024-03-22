@@ -22,14 +22,17 @@ use db::{
 };
 use hash::{HGet, HSet};
 use list::{ListPop, ListPush};
-use ping::{Ping, Quit};
+use ping::{Echo, Ping, Quit};
 use rdb::{BgSave, Save};
 use set::{SAdd, SRem};
 use std::io::{Error, ErrorKind, Result};
 use std::vec;
 use string::{Append, Get, Set, Strlen};
+use string::{Decr, DecrBy, Incr, IncrBy};
 use tokio::fs::File;
 use unknown::Unknown;
+
+use self::string::SetNx;
 
 pub struct CommandParser {
     parts: vec::IntoIter<Frame>,
@@ -68,7 +71,7 @@ impl CommandParser {
         }
     }
 
-    pub fn next_integer(&mut self) -> Result<Option<u64>> {
+    pub fn next_integer(&mut self) -> Result<Option<i64>> {
         if let Some(frame) = self.next() {
             match frame {
                 Frame::Bulk(b) => match std::str::from_utf8(&b[..]) {
@@ -90,12 +93,18 @@ impl CommandParser {
 #[derive(Debug, Clone)]
 pub enum Command {
     Ping(Ping),
+    Echo(Echo),
     Quit(Quit),
 
     Get(Get),
     Set(Set),
+    SetNx(SetNx),
     Append(Append),
     Strlen(Strlen),
+    Incr(Incr),
+    IncrBy(IncrBy),
+    Decr(Decr),
+    DecrBy(DecrBy),
 
     Del(Del),
     Exists(Exists),
@@ -156,8 +165,13 @@ impl Command {
 
             b"get" => Command::Get(Get::from(&mut parser)?),
             b"set" => Command::Set(Set::from(&mut parser)?),
+            b"setnx" => Command::SetNx(SetNx::from(&mut parser)?),
             b"append" => Command::Append(Append::from(&mut parser)?),
             b"strlen" => Command::Strlen(Strlen::from(&mut parser)?),
+            b"incr" => Command::Incr(Incr::from(&mut parser)?),
+            b"incrby" => Command::IncrBy(IncrBy::from(&mut parser)?),
+            b"decr" => Command::Decr(Decr::from(&mut parser)?),
+            b"decrby" => Command::DecrBy(DecrBy::from(&mut parser)?),
 
             b"del" => Command::Del(Del::from(&mut parser)?),
             b"exists" => Command::Exists(Exists::from(&mut parser)?),
@@ -232,7 +246,7 @@ impl Client {
             Command::DbSize(_) => {
                 // let len = self.dbs.len();
                 let len = 1; // only one database for now
-                self.write_frame(&Frame::Integer(len as u64)).await?;
+                self.write_frame(&Frame::Integer(len)).await?;
                 // continue;
             }
             Command::Save(_) => {
@@ -292,6 +306,7 @@ impl Client {
             }
 
             Command::Ping(cmd) => cmd.apply(self).await?,
+            Command::Echo(cmd) => cmd.apply(self).await?,
             Command::Quit(_) => {
                 self.server.quit_ch.send(());
                 self.write_frame(&shared::ok).await?;
@@ -299,8 +314,13 @@ impl Client {
 
             Command::Get(cmd) => cmd.apply(self).await?,
             Command::Set(cmd) => cmd.apply(self).await?,
+            Command::SetNx(cmd) => cmd.apply(self).await?,
             Command::Append(cmd) => cmd.apply(self).await?,
             Command::Strlen(cmd) => cmd.apply(self).await?,
+            Command::Incr(cmd) => cmd.apply(self).await?,
+            Command::IncrBy(cmd) => cmd.apply(self).await?,
+            Command::Decr(cmd) => cmd.apply(self).await?,
+            Command::DecrBy(cmd) => cmd.apply(self).await?,
 
             Command::Del(cmd) => cmd.apply(self).await?,
             Command::Exists(cmd) => cmd.apply(self).await?,

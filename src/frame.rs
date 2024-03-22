@@ -7,7 +7,7 @@ use std::str::FromStr;
 pub enum Frame {
     Simple(Bytes),
     Error(Bytes),
-    Integer(u64),
+    Integer(i64),
     Bulk(Bytes),
     Null,
     Array(Vec<Frame>),
@@ -26,7 +26,7 @@ impl Frame {
         Frame::Bulk(Bytes::copy_from_slice(s.into()))
     }
 
-    pub fn new_integer_from(i: u64) -> Frame {
+    pub fn new_integer_from(i: i64) -> Frame {
         Frame::Integer(i)
     }
 

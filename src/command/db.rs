@@ -89,7 +89,8 @@ impl Select {
     pub fn from(frame: &mut CommandParser) -> Result<Self> {
         let index = frame
             .next_integer()?
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "SELECT requires a key"))?;
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "SELECT requires a key"))?
+            as u64;
         Ok(Self { index })
     }
 }
@@ -257,7 +258,8 @@ impl Expire {
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "EXPIRE requires a key"))?;
         let seconds = frame
             .next_integer()?
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "EXPIRE requires a seconds"))?;
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "EXPIRE requires a seconds"))?
+            as u64;
         Ok(Self { key, seconds })
     }
 
@@ -301,7 +303,8 @@ impl ExpireAt {
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "EXPIREAT requires a key"))?;
         let timestamp = frame
             .next_integer()?
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "EXPIREAT requires a timestamp"))?;
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "EXPIREAT requires a timestamp"))?
+            as u64;
         Ok(Self { key, timestamp })
     }
 
@@ -343,9 +346,10 @@ impl PExpire {
         let key = frame
             .next_string()?
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "PEXPIRE requires a key"))?;
-        let milliseconds = frame.next_integer()?.ok_or_else(|| {
-            Error::new(ErrorKind::InvalidInput, "PEXPIRE requires a milliseconds")
-        })?;
+        let milliseconds = frame
+            .next_integer()?
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "PEXPIRE requires a milliseconds"))?
+            as u64;
         Ok(Self { key, milliseconds })
     }
 
@@ -389,7 +393,8 @@ impl PExpireAt {
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "PEXPIREAT requires a key"))?;
         let timestamp = frame
             .next_integer()?
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "PEXPIREAT requires a timestamp"))?;
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "PEXPIREAT requires a timestamp"))?
+            as u64;
         Ok(Self { key, timestamp })
     }
 

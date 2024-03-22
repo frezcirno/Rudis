@@ -12,6 +12,12 @@ impl RudisString {
     pub fn from(value: BytesMut) -> RudisString {
         RudisString { value }
     }
+
+    pub fn parse_int(&self) -> Option<i64> {
+        let value = self.value.as_ref();
+        let value = std::str::from_utf8(value).ok()?;
+        value.parse().ok()
+    }
 }
 
 impl Deref for RudisString {
